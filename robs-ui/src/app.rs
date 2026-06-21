@@ -220,6 +220,8 @@ enum Panel {
 pub struct RobsApp {
     streaming: bool,
     recording: bool,
+    recording_paused: bool,
+    streaming_paused: bool,
     profile_manager: Arc<RwLock<ProfileManager>>,
     chat_messages: Arc<RwLock<VecDeque<UnifiedChatMessage>>>,
     chat_input: String,
@@ -231,6 +233,7 @@ pub struct RobsApp {
     active_settings_tab: usize,
     audio_channels: Vec<AudioChannel>,
     streaming_time: u64,
+    recording_time: u64,
     bitrate: u32,
     dropped_frames: u64,
     fps: f64,
@@ -306,6 +309,18 @@ pub struct RobsApp {
     editing_source_crop_top: u32,
     editing_source_crop_right: u32,
     editing_source_crop_bottom: u32,
+    // Annotation / mark-up tools
+    show_annotations: bool,
+    annotations: Vec<robs_core::Annotation>,
+    annotation_tool: robs_core::AnnotationTool,
+    annotation_style: robs_core::AnnotationStyle,
+    annotation_drawing: Option<robs_core::Annotation>,
+    selected_annotation: Option<robs_core::AnnotationId>,
+    // Text annotation inline editor
+    editing_text_id: Option<robs_core::AnnotationId>,
+    text_input: String,
+    // Font used for baking text annotations into recordings (lazy-loaded).
+    record_font: Option<ab_glyph::FontVec>,
 }
 
 #[derive(Clone)]
@@ -368,7 +383,11 @@ fn parse_monitor_index(source_name: &str) -> u32 {
 }
 
 impl RobsApp {
-    pub fn new(_cc: &eframe::CreationContext) -> Self {
+    pub fn new(cc: &eframe::CreationContext) -> Self {
+        cc.egui_ctx.style_mut(|style| {
+            style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+        });
+
         let detection = detect_encoders();
 
         let mut video_encoders = Vec::new();
@@ -407,6 +426,8 @@ impl RobsApp {
         Self {
             streaming: false,
             recording: false,
+            recording_paused: false,
+            streaming_paused: false,
             profile_manager: Arc::new(RwLock::new(ProfileManager::default())),
             chat_messages: Arc::new(RwLock::new(VecDeque::with_capacity(500))),
             chat_input: String::new(),
@@ -437,6 +458,7 @@ impl RobsApp {
                 },
             ],
             streaming_time: 0,
+            recording_time: 0,
             bitrate: 6000,
             dropped_frames: 0,
             fps: 30.0,
@@ -511,6 +533,16 @@ impl RobsApp {
             editing_source_crop_top: 0,
             editing_source_crop_right: 0,
             editing_source_crop_bottom: 0,
+            // Annotation / mark-up tools
+            show_annotations: true,
+            annotations: Vec::new(),
+            annotation_tool: robs_core::AnnotationTool::default(),
+            annotation_style: robs_core::AnnotationStyle::default(),
+            annotation_drawing: None,
+            selected_annotation: None,
+            editing_text_id: None,
+            text_input: String::new(),
+            record_font: None,
         }
     }
 
@@ -532,10 +564,15 @@ impl RobsApp {
             }
         }
         if self.streaming {
-            self.streaming_time += 1;
+            if !self.streaming_paused {
+                self.streaming_time += 1;
+            }
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
         if self.recording {
+            if !self.recording_paused {
+                self.recording_time += 1;
+            }
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
     }
@@ -881,6 +918,8 @@ impl RobsApp {
         }
 
         self.recording = true;
+        self.recording_paused = false;
+        self.recording_time = 0;
         self.recording_start_time = Some(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -944,15 +983,11 @@ impl RobsApp {
         self.recording_frame_sender = None;
         self.ffmpeg_recording_handle = None;
         self.recording = false;
-        let elapsed = self.recording_start_time.map(|start| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                - start
-        });
+        self.recording_paused = false;
+        let elapsed = self.recording_time;
+        self.recording_time = 0;
 
-        let duration_str = elapsed.map(|s| Self::format_time(s)).unwrap_or_default();
+        let duration_str = Self::format_time(elapsed);
 
         // Verify file was created and has proper size
         let file_exists = std::path::Path::new(&self.last_recording_path).exists();
@@ -1076,6 +1111,33 @@ impl RobsApp {
             rgba_data.to_vec()
         };
 
+        // Bake annotations into the frame. Annotations are stored in scene
+        // output coordinates; map them onto the output-resolution frame.
+        let mut scaled_data = scaled_data;
+        if !self.annotations.is_empty() {
+            let (scene_w, scene_h) = self
+                .scenes
+                .current_scene()
+                .map(|s| s.output_size())
+                .unwrap_or((out_w, out_h));
+            if scene_w > 0 && scene_h > 0 {
+                let scale_x = out_w as f32 / scene_w as f32;
+                let scale_y = out_h as f32 / scene_h as f32;
+                if self.record_font.is_none() {
+                    self.record_font = crate::annotation_raster::load_system_font();
+                }
+                crate::annotation_raster::composite_annotations(
+                    &mut scaled_data,
+                    out_w,
+                    out_h,
+                    &self.annotations,
+                    scale_x,
+                    scale_y,
+                    self.record_font.as_ref(),
+                );
+            }
+        }
+
         // Convert RGBA to BGRA for FFmpeg
         let mut bgra_data = scaled_data;
         for chunk in bgra_data.chunks_exact_mut(4) {
@@ -1195,7 +1257,7 @@ impl RobsApp {
 
                     // RECORDING: Reuse the captured frame for recording
                     // This eliminates double capture - recording taps into the same frame preview uses
-                    if self.recording && self.recording_frame_sender.is_some() {
+                    if self.recording && !self.recording_paused && self.recording_frame_sender.is_some() {
                         self.send_frame_to_recording(&rgba_data, width, height);
                     }
                 }
@@ -1272,6 +1334,7 @@ impl RobsApp {
 
     fn menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New Profile").clicked() {
@@ -1305,6 +1368,8 @@ impl RobsApp {
                     ui.checkbox(&mut self.show_audio, "Audio Mixer");
                     ui.checkbox(&mut self.show_chat, "Chat");
                     ui.checkbox(&mut self.show_stats, "Stats");
+                    ui.separator();
+                    ui.checkbox(&mut self.show_annotations, "Annotations Toolbar");
                 });
                 ui.menu_button("Profile", |ui| {
                     let profiles = self.profile_manager.read().list();
@@ -1321,74 +1386,218 @@ impl RobsApp {
                     }
                 });
             });
+            ui.add_space(4.0);
         });
+    }
+
+    /// Toolbar for the annotation / mark-up tools: tool selection, stroke
+    /// color, stroke width, and undo/clear. Shown as a thin panel directly
+    /// below the menu bar while `show_annotations` is enabled.
+    fn annotation_toolbar(&mut self, ctx: &egui::Context) {
+        if !self.show_annotations {
+            return;
+        }
+
+        egui::TopBottomPanel::top("annotation_toolbar")
+            .exact_height(36.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    // Tool buttons: Select first, then the drawable shapes.
+                    let mut tools: Vec<robs_core::AnnotationTool> = vec![robs_core::AnnotationTool::Select];
+                    tools.extend(
+                        robs_core::AnnotationShape::ALL
+                            .iter()
+                            .map(|s| tool_from_shape(*s)),
+                    );
+
+                    for tool in tools {
+                        let selected = self.annotation_tool == tool;
+                        let label = match tool {
+                            robs_core::AnnotationTool::Select => "🖱 Select".to_owned(),
+                            _ => {
+                                let s = tool.shape().unwrap();
+                                format!("{} {}", s.icon(), s.label())
+                            }
+                        };
+                        if ui.selectable_label(selected, label).clicked() {
+                            self.annotation_tool = tool;
+                            if tool == robs_core::AnnotationTool::Select {
+                                self.selected_annotation = None;
+                            }
+                        }
+                    }
+
+                    ui.separator();
+
+                    // Stroke color
+                    let mut color = [
+                        self.annotation_style.color[0],
+                        self.annotation_style.color[1],
+                        self.annotation_style.color[2],
+                    ];
+                    ui.label("Color");
+                    if ui.color_edit_button_srgb(&mut color).changed() {
+                        self.annotation_style.color = [color[0], color[1], color[2], 255];
+                    }
+
+                    ui.separator();
+
+                    // Stroke width
+                    ui.label("Width");
+                    ui.add(
+                        egui::Slider::new(&mut self.annotation_style.stroke_width, 1.0..=24.0)
+                            .clamp_to_range(true),
+                    );
+
+                    // Fill toggle for closed shapes
+                    let closed = self
+                        .annotation_tool
+                        .shape()
+                        .map(|s| s.is_closed())
+                        .unwrap_or(false);
+                    if closed {
+                        ui.checkbox(&mut self.annotation_style.filled, "Fill");
+                    }
+
+                    ui.separator();
+
+                    // Undo / Clear
+                    if ui.button("↶ Undo").clicked() {
+                        self.annotations.pop();
+                    }
+                    if ui.button("🗑 Clear").clicked() {
+                        self.annotations.clear();
+                        self.selected_annotation = None;
+                    }
+
+                    ui.separator();
+
+                    ui.label(
+                        egui::RichText::new(if self.annotation_tool == robs_core::AnnotationTool::Select {
+                            "Click an annotation to select, drag to move, Del to remove"
+                        } else {
+                            "Click and drag on the preview to draw"
+                        })
+                        .color(egui::Color32::from_rgb(150, 150, 150))
+                        .small(),
+                    );
+                });
+                ui.add_space(4.0);
+            });
     }
 
     fn streaming_controls(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("streaming_controls").show(ctx, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let stream_text = if self.streaming {
-                    "Stop Streaming"
+                // ---- Streaming controls ----
+                let (stream_icon, stream_label, stream_color) = if !self.streaming {
+                    ("\u{25B6}", "Start", egui::Color32::from_rgb(0, 170, 0))
+                } else if self.streaming_paused {
+                    ("\u{25B6}", "Resume", egui::Color32::from_rgb(0, 170, 0))
                 } else {
-                    "Start Streaming"
-                };
-                let stream_color = if self.streaming {
-                    egui::Color32::RED
-                } else {
-                    egui::Color32::GREEN
+                    ("\u{23F8}", "Pause", egui::Color32::from_rgb(210, 160, 0))
                 };
                 if ui
-                    .add(egui::Button::new(
-                        egui::RichText::new(stream_text).color(stream_color),
-                    ))
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} {}", stream_icon, stream_label))
+                                .color(stream_color)
+                                .strong(),
+                        ),
+                    )
                     .clicked()
                 {
-                    self.streaming = !self.streaming;
-                    if self.streaming {
+                    if !self.streaming {
+                        self.streaming = true;
                         self.streaming_time = 0;
+                        self.streaming_paused = false;
+                    } else if self.streaming_paused {
+                        self.streaming_paused = false;
+                    } else {
+                        self.streaming_paused = true;
                     }
                 }
-
-                let rec_text = if self.recording {
-                    "Stop Recording"
-                } else {
-                    "Start Recording"
-                };
-                let rec_color = if self.recording {
-                    egui::Color32::RED
-                } else {
-                    egui::Color32::from_rgb(200, 100, 0)
-                };
                 if ui
-                    .add(egui::Button::new(
-                        egui::RichText::new(rec_text).color(rec_color),
-                    ))
+                    .add_enabled(
+                        self.streaming,
+                        egui::Button::new(
+                            egui::RichText::new("\u{23F9} Stop").color(egui::Color32::RED),
+                        ),
+                    )
                     .clicked()
                 {
-                    eprintln!(
-                        "[Recording] Record button clicked! recording={}",
-                        self.recording
-                    );
-                    if self.recording {
-                        eprintln!("[Recording] Calling stop_recording()");
-                        self.stop_recording();
-                    } else {
-                        eprintln!("[Recording] Calling start_recording()");
+                    self.streaming = false;
+                    self.streaming_paused = false;
+                }
+
+                ui.separator();
+
+                // ---- Recording controls ----
+                let (rec_icon, rec_label, rec_color) = if !self.recording {
+                    ("\u{25B6}", "Start", egui::Color32::from_rgb(0, 170, 0))
+                } else if self.recording_paused {
+                    ("\u{25B6}", "Resume", egui::Color32::from_rgb(0, 170, 0))
+                } else {
+                    ("\u{23F8}", "Pause", egui::Color32::from_rgb(210, 160, 0))
+                };
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} {}", rec_icon, rec_label))
+                                .color(rec_color)
+                                .strong(),
+                        ),
+                    )
+                    .clicked()
+                {
+                    if !self.recording {
                         self.start_recording();
+                    } else if self.recording_paused {
+                        self.recording_paused = false;
+                    } else {
+                        self.recording_paused = true;
                     }
+                }
+                if ui
+                    .add_enabled(
+                        self.recording,
+                        egui::Button::new(
+                            egui::RichText::new("\u{23F9} Stop").color(egui::Color32::RED),
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.stop_recording();
                 }
 
                 ui.separator();
                 ui.label(format!("Scene: {}", self.current_scene));
 
-                if self.streaming {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new("● LIVE").color(egui::Color32::RED));
+                // ---- Status indicators (right-aligned) ----
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.streaming {
+                        let live_text = if self.streaming_paused {
+                            egui::RichText::new("\u{23F8} PAUSED").color(egui::Color32::from_rgb(210, 160, 0))
+                        } else {
+                            egui::RichText::new("\u{25CF} LIVE").color(egui::Color32::RED)
+                        };
+                        ui.label(live_text);
                         ui.label(Self::format_time(self.streaming_time));
-                        ui.label(format!("{} kbps", self.bitrate));
-                    });
-                }
+                    }
+                    if self.recording {
+                        let rec_text = if self.recording_paused {
+                            egui::RichText::new("\u{23F8} PAUSED").color(egui::Color32::from_rgb(210, 160, 0))
+                        } else {
+                            egui::RichText::new("\u{25CF} REC").color(egui::Color32::RED)
+                        };
+                        ui.label(rec_text);
+                        ui.label(Self::format_time(self.recording_time));
+                    }
+                });
             });
+            ui.add_space(2.0);
         });
     }
 
@@ -2116,6 +2325,268 @@ impl RobsApp {
         }
     }
 
+    /// Render committed and in-progress annotations over the canvas and
+    /// handle tool interaction (draw / select / move / delete).
+    ///
+    /// `canvas_rect` is the on-screen rectangle representing the whole scene
+    /// and `canvas_scale` converts scene coordinates -> screen pixels (see
+    /// [`Self::preview_panel`] for the canonical letterbox math).
+    fn render_annotations(
+        &mut self,
+        ui: &mut egui::Ui,
+        canvas_rect: egui::Rect,
+        canvas_scale: f32,
+    ) {
+        if !self.show_annotations {
+            return;
+        }
+
+        let to_screen = |p: Position| {
+            egui::pos2(
+                canvas_rect.min.x + p.x * canvas_scale,
+                canvas_rect.min.y + p.y * canvas_scale,
+            )
+        };
+        let to_scene = |sp: egui::Pos2| {
+            Position::new(
+                (sp.x - canvas_rect.min.x) / canvas_scale,
+                (sp.y - canvas_rect.min.y) / canvas_scale,
+            )
+        };
+        let painter = ui.painter();
+        let canvas_min = canvas_rect.min;
+
+        // Compute the screen-space bounding rect of an annotation (for
+        // selection highlighting + hit-testing).
+        let text_font_screen =
+            (crate::annotation_raster::TEXT_FONT_SIZE * canvas_scale).max(8.0);
+        let screen_bbox = |ann: &robs_core::Annotation| -> egui::Rect {
+            match ann.shape() {
+                robs_core::AnnotationShape::Pen => {
+                    if ann.points().is_empty() {
+                        return egui::Rect::NOTHING;
+                    }
+                    let pts: Vec<egui::Pos2> =
+                        ann.points().iter().map(|&p| to_screen(p)).collect();
+                    let mut r = egui::Rect::from_two_pos(pts[0], pts[0]);
+                    for p in &pts[1..] {
+                        r.extend_with(*p);
+                    }
+                    r
+                }
+                robs_core::AnnotationShape::Text => {
+                    let anchor = to_screen(ann.start());
+                    let w = (ann.text().len().max(1) as f32) * text_font_screen * 0.6;
+                    egui::Rect::from_min_size(
+                        anchor,
+                        egui::vec2(w.max(20.0), text_font_screen * 1.3),
+                    )
+                }
+                _ => egui::Rect::from_two_pos(to_screen(ann.start()), to_screen(ann.end())),
+            }
+        };
+
+        // 1. Collect (id, index, screen-bbox) for visible annotations.
+        let draw_info: Vec<(robs_core::AnnotationId, usize, egui::Rect)> = self
+            .annotations
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.is_visible())
+            .map(|(i, a)| (a.id(), i, screen_bbox(a)))
+            .collect();
+
+        let selected = self.selected_annotation;
+
+        // 2. Paint committed annotations + selection highlight.
+        for &(id, idx, bbox) in &draw_info {
+            let ann = &self.annotations[idx];
+            paint_annotation(painter, ann, canvas_min, canvas_scale);
+            if selected == Some(id) {
+                painter.rect_stroke(
+                    bbox.expand(4.0),
+                    2.0,
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 180, 255)),
+                );
+            }
+        }
+
+        // 3. Paint the in-progress annotation.
+        if let Some(ann) = self.annotation_drawing.as_ref() {
+            paint_annotation(painter, ann, canvas_min, canvas_scale);
+        }
+
+        // 4. Tool interaction
+        let tool = self.annotation_tool;
+        match tool {
+            // ---- Pen: drag to accumulate freehand points ----
+            robs_core::AnnotationTool::Pen => {
+                let resp = ui.interact(
+                    canvas_rect,
+                    ui.make_persistent_id("annotation_pen_canvas"),
+                    egui::Sense::drag(),
+                );
+                if resp.drag_started() {
+                    if let Some(pos) = resp.hover_pos() {
+                        let scene_pos = to_scene(pos);
+                        let mut ann =
+                            robs_core::Annotation::new(robs_core::AnnotationShape::Pen, scene_pos, scene_pos);
+                        ann.set_style(self.annotation_style);
+                        ann.push_point(scene_pos);
+                        self.annotation_drawing = Some(ann);
+                    }
+                }
+                if resp.dragged() {
+                    if let Some(pos) = resp.hover_pos() {
+                        if let Some(ann) = self.annotation_drawing.as_mut() {
+                            ann.push_point(to_scene(pos));
+                        }
+                    }
+                }
+                if resp.drag_released() {
+                    if let Some(ann) = self.annotation_drawing.take() {
+                        if ann.points().len() > 1 {
+                            self.annotations.push(ann);
+                        }
+                    }
+                }
+            }
+            // ---- Text: click to place, then type inline ----
+            robs_core::AnnotationTool::Text => {
+                let resp = ui.interact(
+                    canvas_rect,
+                    ui.make_persistent_id("annotation_text_canvas"),
+                    egui::Sense::click(),
+                );
+                if resp.clicked() {
+                    if let Some(pos) = resp.hover_pos() {
+                        let scene_pos = to_scene(pos);
+                        let mut ann = robs_core::Annotation::new(
+                            robs_core::AnnotationShape::Text,
+                            scene_pos,
+                            scene_pos,
+                        );
+                        ann.set_style(self.annotation_style);
+                        self.annotations.push(ann);
+                        let new_id = self.annotations.last().map(|a| a.id());
+                        self.editing_text_id = new_id;
+                        self.text_input.clear();
+                    }
+                }
+            }
+            // ---- Select: click to select, drag to move, Del to remove ----
+            robs_core::AnnotationTool::Select => {
+                let mut clicked_id = None;
+                for &(id, _idx, bbox) in draw_info.iter().rev() {
+                    let resp = ui.interact(
+                        bbox.expand(6.0),
+                        ui.make_persistent_id(format!("annotation_{}", id.0 .0)),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if clicked_id.is_none() && resp.clicked() {
+                        clicked_id = Some(id);
+                    }
+                    if resp.dragged() {
+                        let delta = resp.drag_delta();
+                        let dx = delta.x / canvas_scale;
+                        let dy = delta.y / canvas_scale;
+                        if let Some(ann) =
+                            self.annotations.iter_mut().find(|a| a.id() == id)
+                        {
+                            ann.translate(dx, dy);
+                        }
+                    }
+                }
+                if let Some(id) = clicked_id {
+                    self.selected_annotation = Some(id);
+                }
+                if let Some(sel) = self.selected_annotation {
+                    let delete_pressed = ui.input(|i| {
+                        i.key_pressed(egui::Key::Delete)
+                            || i.key_pressed(egui::Key::Backspace)
+                    });
+                    if delete_pressed {
+                        self.annotations.retain(|a| a.id() != sel);
+                        self.selected_annotation = None;
+                    }
+                }
+            }
+            // ---- Regular shapes (Arrow/Line/Rectangle/Ellipse): drag to create ----
+            _ => {
+                let shape = tool.shape().unwrap();
+                let resp = ui.interact(
+                    canvas_rect,
+                    ui.make_persistent_id("annotation_draw_canvas"),
+                    egui::Sense::drag(),
+                );
+                if resp.drag_started() {
+                    if let Some(pos) = resp.hover_pos() {
+                        let scene_pos = to_scene(pos);
+                        let mut ann = robs_core::Annotation::new(shape, scene_pos, scene_pos);
+                        ann.set_style(self.annotation_style);
+                        self.annotation_drawing = Some(ann);
+                    }
+                }
+                if resp.dragged() {
+                    if let Some(pos) = resp.hover_pos() {
+                        if let Some(ann) = self.annotation_drawing.as_mut() {
+                            ann.set_end(to_scene(pos));
+                        }
+                    }
+                }
+                if resp.drag_released() {
+                    if let Some(ann) = self.annotation_drawing.take() {
+                        let (w, h) = ann.size();
+                        if w > 2.0 || h > 2.0 {
+                            self.annotations.push(ann);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Inline text editor for the annotation being edited.
+        if let Some(edit_id) = self.editing_text_id {
+            let exists = self.annotations.iter().any(|a| a.id() == edit_id);
+            if !exists {
+                self.editing_text_id = None;
+            } else {
+                let anchor = to_screen(
+                    self.annotations
+                        .iter()
+                        .find(|a| a.id() == edit_id)
+                        .map(|a| a.start())
+                        .unwrap_or_default(),
+                );
+                let edit_rect = egui::Rect::from_min_size(
+                    anchor,
+                    egui::vec2(200.0, text_font_screen + 8.0),
+                );
+                let resp = ui.put(
+                    edit_rect,
+                    egui::TextEdit::singleline(&mut self.text_input)
+                        .font(egui::FontId::proportional(text_font_screen))
+                        .desired_width(200.0),
+                );
+                // Focus the field once on first appearance.
+                if !resp.has_focus() && !resp.lost_focus() {
+                    resp.request_focus();
+                }
+                let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if resp.lost_focus() || escape {
+                    let text = std::mem::take(&mut self.text_input);
+                    if text.is_empty() || escape {
+                        self.annotations.retain(|a| a.id() != edit_id);
+                    } else if let Some(ann) =
+                        self.annotations.iter_mut().find(|a| a.id() == edit_id)
+                    {
+                        ann.set_text(text);
+                    }
+                    self.editing_text_id = None;
+                }
+            }
+        }
+    }
+
     fn preview_panel(&mut self, ctx: &egui::Context) {
         if self.show_preview {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -2152,6 +2623,11 @@ impl RobsApp {
                     2.0,
                     egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)),
                 );
+
+                // A draw tool overrides source-item dragging so the canvas is
+                // free for drawing annotations.
+                let draw_active =
+                    self.show_annotations && self.annotation_tool.shape().is_some();
 
                 // Render scene items
                 if let Some(scene) = scene {
@@ -2248,72 +2724,74 @@ impl RobsApp {
                             egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 120, 255)),
                         );
 
-                        // Make item draggable
-                        let response = ui.interact(
-                            item_rect,
-                            ui.make_persistent_id(format!("source_item_{}", id.0 .0)),
-                            egui::Sense::drag(),
-                        );
-
-                        if response.dragged() {
-                            let drag_delta = response.drag_delta();
-                            let delta_scene_x = drag_delta.x / canvas_scale;
-                            let delta_scene_y = drag_delta.y / canvas_scale;
-
-                            if let Some(scene) = self.scenes.current_scene_mut() {
-                                if let Some(item) = scene.item_mut(id) {
-                                    let pos = item.position();
-                                    item.set_position(Position::new(
-                                        pos.x + delta_scene_x,
-                                        pos.y + delta_scene_y,
-                                    ));
-                                }
-                            }
-                        }
-
-                        // Draw resize handles at corners
-                        let handle_size = 8.0;
-                        let corners = [
-                            (item_rect.min, "tl"),
-                            (egui::pos2(item_rect.max.x, item_rect.min.y), "tr"),
-                            (egui::pos2(item_rect.min.x, item_rect.max.y), "bl"),
-                            (item_rect.max, "br"),
-                        ];
-
-                        for (corner, corner_name) in corners {
-                            let handle_rect = egui::Rect::from_center_size(
-                                corner,
-                                egui::vec2(handle_size, handle_size),
-                            );
-                            ui.painter()
-                                .rect_filled(handle_rect, 1.0, egui::Color32::WHITE);
-                            ui.painter().rect_stroke(
-                                handle_rect,
-                                1.0,
-                                egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 120, 255)),
-                            );
-
-                            // Make corner handle draggable for resize
-                            let drag_response = ui.interact(
-                                handle_rect,
-                                ui.make_persistent_id(format!(
-                                    "resize_{}_{}",
-                                    id.0 .0, corner_name
-                                )),
+                        // Make item draggable (disabled while drawing annotations)
+                        if !draw_active {
+                            let response = ui.interact(
+                                item_rect,
+                                ui.make_persistent_id(format!("source_item_{}", id.0 .0)),
                                 egui::Sense::drag(),
                             );
 
-                            if drag_response.dragged() {
-                                let drag_delta = drag_response.drag_delta();
-                                let delta_w = drag_delta.x / canvas_scale;
-                                let delta_h = drag_delta.y / canvas_scale;
+                            if response.dragged() {
+                                let drag_delta = response.drag_delta();
+                                let delta_scene_x = drag_delta.x / canvas_scale;
+                                let delta_scene_y = drag_delta.y / canvas_scale;
 
                                 if let Some(scene) = self.scenes.current_scene_mut() {
                                     if let Some(item) = scene.item_mut(id) {
-                                        let scale = item.scale();
-                                        let new_sx = (scale.x + delta_w / src_w).max(0.01);
-                                        let new_sy = (scale.y + delta_h / src_h).max(0.01);
-                                        item.set_scale(Scale::new(new_sx, new_sy));
+                                        let pos = item.position();
+                                        item.set_position(Position::new(
+                                            pos.x + delta_scene_x,
+                                            pos.y + delta_scene_y,
+                                        ));
+                                    }
+                                }
+                            }
+
+                            // Draw resize handles at corners
+                            let handle_size = 8.0;
+                            let corners = [
+                                (item_rect.min, "tl"),
+                                (egui::pos2(item_rect.max.x, item_rect.min.y), "tr"),
+                                (egui::pos2(item_rect.min.x, item_rect.max.y), "bl"),
+                                (item_rect.max, "br"),
+                            ];
+
+                            for (corner, corner_name) in corners {
+                                let handle_rect = egui::Rect::from_center_size(
+                                    corner,
+                                    egui::vec2(handle_size, handle_size),
+                                );
+                                ui.painter()
+                                    .rect_filled(handle_rect, 1.0, egui::Color32::WHITE);
+                                ui.painter().rect_stroke(
+                                    handle_rect,
+                                    1.0,
+                                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 120, 255)),
+                                );
+
+                                // Make corner handle draggable for resize
+                                let drag_response = ui.interact(
+                                    handle_rect,
+                                    ui.make_persistent_id(format!(
+                                        "resize_{}_{}",
+                                        id.0 .0, corner_name
+                                    )),
+                                    egui::Sense::drag(),
+                                );
+
+                                if drag_response.dragged() {
+                                    let drag_delta = drag_response.drag_delta();
+                                    let delta_w = drag_delta.x / canvas_scale;
+                                    let delta_h = drag_delta.y / canvas_scale;
+
+                                    if let Some(scene) = self.scenes.current_scene_mut() {
+                                        if let Some(item) = scene.item_mut(id) {
+                                            let scale = item.scale();
+                                            let new_sx = (scale.x + delta_w / src_w).max(0.01);
+                                            let new_sy = (scale.y + delta_h / src_h).max(0.01);
+                                            item.set_scale(Scale::new(new_sx, new_sy));
+                                        }
                                     }
                                 }
                             }
@@ -2338,6 +2816,9 @@ impl RobsApp {
                         egui::Color32::GRAY,
                     );
                 }
+
+                // Annotation / mark-up overlay and tool interaction
+                self.render_annotations(ui, canvas_rect, canvas_scale);
 
                 // Show recording indicator
                 if self.recording {
@@ -2368,52 +2849,61 @@ impl RobsApp {
                         if self.show_controls {
                             ui.collapsing("Controls", |ui| {
                                 ui.vertical_centered(|ui| {
-                                    let stream_text = if self.streaming {
-                                        "Stop Streaming"
+                                    // ---- Streaming controls ----
+                                    let (s_icon, s_label, s_color) = if !self.streaming {
+                                        ("\u{25B6}", "Start", egui::Color32::from_rgb(0, 170, 0))
+                                    } else if self.streaming_paused {
+                                        ("\u{25B6}", "Resume", egui::Color32::from_rgb(0, 170, 0))
                                     } else {
-                                        "Start Streaming"
+                                        ("\u{23F8}", "Pause", egui::Color32::from_rgb(210, 160, 0))
                                     };
-                                    let stream_color = if self.streaming {
-                                        egui::Color32::RED
-                                    } else {
-                                        egui::Color32::GREEN
-                                    };
-                                    if ui
-                                        .add(egui::Button::new(
-                                            egui::RichText::new(stream_text).color(stream_color),
-                                        ))
-                                        .clicked()
-                                    {
-                                        self.streaming = !self.streaming;
-                                        if self.streaming {
+                                    if ui.add(egui::Button::new(
+                                        egui::RichText::new(format!("{} Stream", s_icon)).color(s_color).strong(),
+                                    )).clicked() {
+                                        if !self.streaming {
+                                            self.streaming = true;
                                             self.streaming_time = 0;
+                                            self.streaming_paused = false;
+                                        } else if self.streaming_paused {
+                                            self.streaming_paused = false;
+                                        } else {
+                                            self.streaming_paused = true;
                                         }
                                     }
-                                    let rec_text = if self.recording {
-                                        "Stop Recording"
+                                    if ui.add_enabled(
+                                        self.streaming,
+                                        egui::Button::new(egui::RichText::new("\u{23F9} Stop Stream").color(egui::Color32::RED)),
+                                    ).clicked() {
+                                        self.streaming = false;
+                                        self.streaming_paused = false;
+                                    }
+
+                                    ui.separator();
+
+                                    // ---- Recording controls ----
+                                    let (r_icon, r_label, r_color) = if !self.recording {
+                                        ("\u{25B6}", "Start", egui::Color32::from_rgb(0, 170, 0))
+                                    } else if self.recording_paused {
+                                        ("\u{25B6}", "Resume", egui::Color32::from_rgb(0, 170, 0))
                                     } else {
-                                        "Start Recording"
+                                        ("\u{23F8}", "Pause", egui::Color32::from_rgb(210, 160, 0))
                                     };
-                                    let rec_color = if self.recording {
-                                        egui::Color32::RED
-                                    } else {
-                                        egui::Color32::from_rgb(200, 100, 0)
-                                    };
-                                    if ui
-                                        .add(egui::Button::new(
-                                            egui::RichText::new(rec_text).color(rec_color),
-                                        ))
-                                        .clicked()
-                                    {
-                                        eprintln!(
-                                            "[Recording] Right panel button clicked! recording={}",
-                                            self.recording
-                                        );
-                                        if self.recording {
-                                            self.stop_recording();
-                                        } else {
+                                    if ui.add(egui::Button::new(
+                                        egui::RichText::new(format!("{} Record", r_icon)).color(r_color).strong(),
+                                    )).clicked() {
+                                        if !self.recording {
                                             self.start_recording();
+                                        } else if self.recording_paused {
+                                            self.recording_paused = false;
+                                        } else {
+                                            self.recording_paused = true;
                                         }
+                                    }
+                                    if ui.add_enabled(
+                                        self.recording,
+                                        egui::Button::new(egui::RichText::new("\u{23F9} Stop Record").color(egui::Color32::RED)),
+                                    ).clicked() {
+                                        self.stop_recording();
                                     }
                                     ui.separator();
                                     if ui.button("Studio Mode").clicked() {}
@@ -2561,6 +3051,7 @@ impl eframe::App for RobsApp {
         }
 
         self.menu_bar(ctx);
+        self.annotation_toolbar(ctx);
         self.streaming_controls(ctx);
         self.scenes_panel(ctx);
         self.source_properties_modal(ctx);
@@ -2569,6 +3060,117 @@ impl eframe::App for RobsApp {
 
         if self.show_settings {
             self.show_settings_window(ctx);
+        }
+    }
+}
+
+/// Map an [`robs_core::AnnotationShape`] to its corresponding drawing tool.
+fn tool_from_shape(shape: robs_core::AnnotationShape) -> robs_core::AnnotationTool {
+    match shape {
+        robs_core::AnnotationShape::Arrow => robs_core::AnnotationTool::Arrow,
+        robs_core::AnnotationShape::Line => robs_core::AnnotationTool::Line,
+        robs_core::AnnotationShape::Rectangle => robs_core::AnnotationTool::Rectangle,
+        robs_core::AnnotationShape::Ellipse => robs_core::AnnotationTool::Ellipse,
+        robs_core::AnnotationShape::Pen => robs_core::AnnotationTool::Pen,
+        robs_core::AnnotationShape::Text => robs_core::AnnotationTool::Text,
+    }
+}
+
+/// Paint a single annotation shape in screen coordinates.
+///
+/// `canvas_min` + `canvas_scale` are used to transform the annotation's
+/// scene-space control points / polyline / text anchor into screen pixels.
+fn paint_annotation(
+    painter: &egui::Painter,
+    ann: &robs_core::Annotation,
+    canvas_min: egui::Pos2,
+    canvas_scale: f32,
+) {
+    let to_screen = |p: Position| {
+        egui::pos2(
+            canvas_min.x + p.x * canvas_scale,
+            canvas_min.y + p.y * canvas_scale,
+        )
+    };
+
+    let style = ann.style();
+    let color = egui::Color32::from_rgba_unmultiplied(
+        style.color[0],
+        style.color[1],
+        style.color[2],
+        style.color[3],
+    );
+    let stroke = egui::Stroke::new(style.stroke_width, color);
+    let start = to_screen(ann.start());
+    let end = to_screen(ann.end());
+
+    match ann.shape() {
+        robs_core::AnnotationShape::Line => {
+            painter.line_segment([start, end], stroke);
+        }
+        robs_core::AnnotationShape::Arrow => {
+            painter.line_segment([start, end], stroke);
+            let delta = end - start;
+            let dist = delta.length();
+            if dist > 1.0 {
+                let dir = delta / dist;
+                let head_len = (stroke.width * 3.0).max(12.0);
+                let head_ang = 0.5_f32;
+                let perp = egui::vec2(-dir.y, dir.x);
+                let back = end - dir * head_len;
+                let left = back + perp * (head_len * head_ang.tan());
+                let right = back - perp * (head_len * head_ang.tan());
+                painter.line_segment([end, left], stroke);
+                painter.line_segment([end, right], stroke);
+            }
+        }
+        robs_core::AnnotationShape::Rectangle => {
+            let r = egui::Rect::from_two_pos(start, end);
+            if style.filled {
+                painter.rect_filled(r, 0.0, color);
+            }
+            painter.rect_stroke(r, 0.0, stroke);
+        }
+        robs_core::AnnotationShape::Ellipse => {
+            let r = egui::Rect::from_two_pos(start, end);
+            let center = r.center();
+            let rx = (r.width() / 2.0).abs();
+            let ry = (r.height() / 2.0).abs();
+            let n = 48usize;
+            let points: Vec<egui::Pos2> = (0..n)
+                .map(|i| {
+                    let t = i as f32 / n as f32 * std::f32::consts::TAU;
+                    center + egui::vec2(rx * t.cos(), ry * t.sin())
+                })
+                .collect();
+            if style.filled {
+                painter.add(egui::epaint::Shape::convex_polygon(
+                    points.clone(),
+                    color,
+                    stroke,
+                ));
+            }
+            for w in points.windows(2) {
+                painter.line_segment([w[0], w[1]], stroke);
+            }
+            if n >= 2 {
+                painter.line_segment([points[n - 1], points[0]], stroke);
+            }
+        }
+        robs_core::AnnotationShape::Pen => {
+            let pts: Vec<egui::Pos2> = ann.points().iter().map(|&p| to_screen(p)).collect();
+            for w in pts.windows(2) {
+                painter.line_segment([w[0], w[1]], stroke);
+            }
+        }
+        robs_core::AnnotationShape::Text => {
+            let text = ann.text();
+            if !text.is_empty() {
+                let font_size =
+                    (crate::annotation_raster::TEXT_FONT_SIZE * canvas_scale).max(8.0);
+                let font = egui::FontId::proportional(font_size);
+                painter.text(start, egui::Align2::LEFT_TOP, text, font, color);
+            }
         }
     }
 }

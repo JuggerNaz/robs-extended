@@ -75,7 +75,7 @@ fn main() {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
             .with_min_inner_size([800.0, 600.0])
-            .with_title("ROBS"),
+            .with_title("ROBS - NasQuest"),
         ..Default::default()
     };
 
