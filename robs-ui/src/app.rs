@@ -321,6 +321,11 @@ pub struct RobsApp {
     text_input: String,
     // Font used for baking text annotations into recordings (lazy-loaded).
     record_font: Option<ab_glyph::FontVec>,
+    // Maps scene-item IDs to window handles (HWND) for window-capture sources.
+    window_hwnds: std::collections::HashMap<robs_core::SceneItemId, isize>,
+    // Text overlays (persistent on-screen text baked into recordings).
+    text_overlays: Vec<robs_core::TextOverlay>,
+    overlay_text_input: String,
 }
 
 #[derive(Clone)]
@@ -543,6 +548,9 @@ impl RobsApp {
             editing_text_id: None,
             text_input: String::new(),
             record_font: None,
+            window_hwnds: std::collections::HashMap::new(),
+            text_overlays: Vec::new(),
+            overlay_text_input: String::new(),
         }
     }
 
@@ -1114,7 +1122,7 @@ impl RobsApp {
         // Bake annotations into the frame. Annotations are stored in scene
         // output coordinates; map them onto the output-resolution frame.
         let mut scaled_data = scaled_data;
-        if !self.annotations.is_empty() {
+        if !self.annotations.is_empty() || !self.text_overlays.is_empty() {
             let (scene_w, scene_h) = self
                 .scenes
                 .current_scene()
@@ -1131,6 +1139,15 @@ impl RobsApp {
                     out_w,
                     out_h,
                     &self.annotations,
+                    scale_x,
+                    scale_y,
+                    self.record_font.as_ref(),
+                );
+                crate::annotation_raster::composite_text_overlays(
+                    &mut scaled_data,
+                    out_w,
+                    out_h,
+                    &self.text_overlays,
                     scale_x,
                     scale_y,
                     self.record_font.as_ref(),
@@ -1213,11 +1230,39 @@ impl RobsApp {
             let texture_key = *item_id;
 
             if item_name.starts_with("Window:") {
-                // Window capture - use native GDI (requires HWND)
-                // For now, skip window capture in preview until we store HWND in scene items
-                eprintln!(
-                    "[Preview] Window capture preview pending (HWND not stored in scene item)"
-                );
+                // Window capture via GDI using the stored HWND.
+                if let Some(&hwnd) = self.window_hwnds.get(item_id) {
+                    if let Some((data, width, height)) =
+                        robs_sources::native_capture::capture_window(hwnd)
+                    {
+                        let mut rgba_data = data;
+                        for chunk in rgba_data.chunks_exact_mut(4) {
+                            chunk.swap(0, 2); // BGRA -> RGBA
+                        }
+
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            [width as usize, height as usize],
+                            &rgba_data,
+                        );
+
+                        if let Some(texture) = self.preview_textures.get_mut(&texture_key) {
+                            texture.set(color_image, egui::TextureOptions::LINEAR);
+                        } else {
+                            let texture = ctx.load_texture(
+                                format!("preview_{:?}", texture_key),
+                                color_image,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.preview_textures.insert(texture_key, texture);
+                        }
+
+                        if self.recording && !self.recording_paused
+                            && self.recording_frame_sender.is_some()
+                        {
+                            self.send_frame_to_recording(&rgba_data, width, height);
+                        }
+                    }
+                }
             } else if item_name.starts_with("Display Capture") {
                 // Display capture - parse monitor info from source name
                 // Format: "Display Capture - Name|idx:X|x:Y|y:Z|w:W|h:H"
@@ -1264,10 +1309,12 @@ impl RobsApp {
             }
         }
 
-        // Clean up textures for sources that no longer exist
+        // Clean up textures and hwnd mappings for sources that no longer exist
         let active_ids: std::collections::HashSet<SceneItemId> =
             capture_items.iter().map(|(id, _)| *id).collect();
         self.preview_textures
+            .retain(|id, _| active_ids.contains(id));
+        self.window_hwnds
             .retain(|id, _| active_ids.contains(id));
     }
 
@@ -1463,10 +1510,10 @@ impl RobsApp {
                     ui.separator();
 
                     // Undo / Clear
-                    if ui.button("↶ Undo").clicked() {
+                    if ui.button("\u{238C} Undo").clicked() {
                         self.annotations.pop();
                     }
-                    if ui.button("🗑 Clear").clicked() {
+                    if ui.button("\u{1F5D1} Clear").clicked() {
                         self.annotations.clear();
                         self.selected_annotation = None;
                     }
@@ -1488,12 +1535,17 @@ impl RobsApp {
     }
 
     fn streaming_controls(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("streaming_controls").show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("streaming_controls")
+        .resizable(true)
+        .min_height(50.0)
+        .show(ctx, |ui| {
             ui.add_space(4.0);
+            let panel_h = ui.available_height();
             ui.horizontal(|ui| {
+                ui.set_min_height(panel_h - 6.0);
                 // ---- Streaming controls ----
                 let (stream_icon, stream_label, stream_color) = if !self.streaming {
-                    ("\u{25B6}", "Start", egui::Color32::from_rgb(0, 170, 0))
+                    ("\u{25B6}", "Stream", egui::Color32::from_rgb(0, 170, 0))
                 } else if self.streaming_paused {
                     ("\u{25B6}", "Resume", egui::Color32::from_rgb(0, 170, 0))
                 } else {
@@ -1536,7 +1588,7 @@ impl RobsApp {
 
                 // ---- Recording controls ----
                 let (rec_icon, rec_label, rec_color) = if !self.recording {
-                    ("\u{25B6}", "Start", egui::Color32::from_rgb(0, 170, 0))
+                    ("\u{25B6}", "Record", egui::Color32::from_rgb(0, 170, 0))
                 } else if self.recording_paused {
                     ("\u{25B6}", "Resume", egui::Color32::from_rgb(0, 170, 0))
                 } else {
@@ -1574,6 +1626,8 @@ impl RobsApp {
 
                 ui.separator();
                 ui.label(format!("Scene: {}", self.current_scene));
+                ui.separator();
+                ui.label("Easting \n 987687.21 m");
 
                 // ---- Status indicators (right-aligned) ----
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1963,6 +2017,7 @@ impl RobsApp {
         if self.show_scenes {
             egui::SidePanel::left("scenes_panel")
                 .default_width(250.0)
+                .min_width(200.0)
                 .resizable(true)
                 .show_animated(ctx, true, |ui| {
                     ui.heading("Scenes");
@@ -2081,10 +2136,11 @@ impl RobsApp {
                                             if let Some(scene) = self.scenes.current_scene_mut() {
                                                 let source_id =
                                                     SourceId(robs_core::types::ObjectId::new());
-                                                scene.add_source(
+                                                let item_id = scene.add_source(
                                                     source_id,
                                                     format!("Window: {}", window.title),
                                                 );
+                                                self.window_hwnds.insert(item_id, window.hwnd);
                                             }
                                             ui.close_menu();
                                         }
@@ -2140,7 +2196,15 @@ impl RobsApp {
                             let mut visible = is_visible;
                             ui.horizontal(|ui| {
                                 ui.checkbox(&mut visible, "");
-                                let response = ui.label(&item_name);
+                                // Show a clean display name and truncate to fit panel width.
+                                let display_name = if item_name.starts_with("Display Capture") {
+                                    item_name.split('|').next().unwrap_or(&item_name).to_string()
+                                } else {
+                                    item_name.clone()
+                                };
+                                let response = ui.add(
+                                    egui::Label::new(&display_name).truncate(),
+                                );
 
                                 // Context menu: Remove, Properties
                                 response.context_menu(|ui| {
@@ -2199,6 +2263,46 @@ impl RobsApp {
                                     scene.set_item_visible(id, visible);
                                 }
                             }
+                        }
+
+                        // ---- Text Overlays ----
+                        ui.separator();
+                        ui.heading("Text Overlays");
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.overlay_text_input)
+                                    .hint_text("Enter overlay text...")
+                                    .desired_width(140.0)
+                                    .desired_rows(3),
+                            );
+                            if ui.button("Add").clicked() && !self.overlay_text_input.trim().is_empty() {
+                                self.text_overlays.push(robs_core::TextOverlay::new(
+                                    self.overlay_text_input.trim().to_string(),
+                                ));
+                                self.overlay_text_input.clear();
+                            }
+                        });
+
+                        let mut overlay_remove: Option<robs_core::ObjectId> = None;
+                        for ov in &mut self.text_overlays {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(ov.visible_mut(), "");
+                                let text = ov.text().to_string();
+                                let label: String = text.chars().take(28).collect();
+                                let label = if text.chars().count() > 28 {
+                                    format!("{}...", label)
+                                } else {
+                                    label
+                                };
+                                ui.add(egui::Label::new(label).truncate());
+                                if ui.small_button("X").clicked() {
+                                    overlay_remove = Some(ov.id());
+                                }
+                            });
+                        }
+                        if let Some(id) = overlay_remove {
+                            self.text_overlays.retain(|o| o.id() != id);
                         }
                     }
                 });
@@ -2416,12 +2520,20 @@ impl RobsApp {
         }
 
         // 4. Tool interaction
+        // Inset the interaction rect so it doesn't overlap with side-panel
+        // resize handles (which are rendered by egui and need to receive
+        // drag events at the panel boundary).
+        let interact_rect = {
+            let mut r = canvas_rect;
+            r.max.x -= 8.0;
+            r
+        };
         let tool = self.annotation_tool;
         match tool {
             // ---- Pen: drag to accumulate freehand points ----
             robs_core::AnnotationTool::Pen => {
                 let resp = ui.interact(
-                    canvas_rect,
+                    interact_rect,
                     ui.make_persistent_id("annotation_pen_canvas"),
                     egui::Sense::drag(),
                 );
@@ -2453,7 +2565,7 @@ impl RobsApp {
             // ---- Text: click to place, then type inline ----
             robs_core::AnnotationTool::Text => {
                 let resp = ui.interact(
-                    canvas_rect,
+                    interact_rect,
                     ui.make_persistent_id("annotation_text_canvas"),
                     egui::Sense::click(),
                 );
@@ -2514,7 +2626,7 @@ impl RobsApp {
             _ => {
                 let shape = tool.shape().unwrap();
                 let resp = ui.interact(
-                    canvas_rect,
+                    interact_rect,
                     ui.make_persistent_id("annotation_draw_canvas"),
                     egui::Sense::drag(),
                 );
@@ -2582,6 +2694,86 @@ impl RobsApp {
                         ann.set_text(text);
                     }
                     self.editing_text_id = None;
+                }
+            }
+        }
+    }
+
+    /// Render draggable text overlays on the canvas.
+    fn render_text_overlays(
+        &mut self,
+        ui: &mut egui::Ui,
+        canvas_rect: egui::Rect,
+        canvas_scale: f32,
+    ) {
+        if self.text_overlays.is_empty() {
+            return;
+        }
+        let canvas_min = canvas_rect.min;
+        let to_scene = |sp: egui::Pos2| {
+            Position::new(
+                (sp.x - canvas_min.x) / canvas_scale,
+                (sp.y - canvas_min.y) / canvas_scale,
+            )
+        };
+        let painter = ui.painter();
+
+        // Collect overlay data for rendering + interaction.
+        let items: Vec<(
+            robs_core::ObjectId,
+            String,
+            egui::Pos2,
+            f32,
+            [u8; 4],
+        )> = self
+            .text_overlays
+            .iter()
+            .filter(|o| o.is_visible())
+            .map(|o| {
+                let screen_pos = egui::pos2(
+                    canvas_min.x + o.position().x * canvas_scale,
+                    canvas_min.y + o.position().y * canvas_scale,
+                );
+                let font_size = (o.font_size() * canvas_scale).max(8.0);
+                (
+                    o.id(),
+                    o.text().to_string(),
+                    screen_pos,
+                    font_size,
+                    o.color(),
+                )
+            })
+            .collect();
+
+        for (id, text, pos, font_size, color) in &items {
+            let text_color = egui::Color32::from_rgba_unmultiplied(
+                color[0], color[1], color[2], color[3],
+            );
+            let font = egui::FontId::proportional(*font_size);
+            let galley =
+                painter
+                    .ctx()
+                    .fonts(|f| f.layout_no_wrap(text.clone(), font.clone(), text_color));
+            let bg_rect = egui::Rect::from_min_size(
+                *pos - egui::vec2(4.0, 2.0),
+                galley.size() + egui::vec2(8.0, 4.0),
+            );
+            painter.rect_filled(bg_rect, 2.0, egui::Color32::from_rgba_premultiplied(0, 0, 0, 160));
+            painter.text(*pos, egui::Align2::LEFT_TOP, text, font, text_color);
+
+            // Drag to reposition
+            let resp = ui.interact(
+                bg_rect,
+                ui.make_persistent_id(format!("text_overlay_{}", id.0)),
+                egui::Sense::drag(),
+            );
+            if resp.dragged() {
+                let delta = resp.drag_delta();
+                let dx = delta.x / canvas_scale;
+                let dy = delta.y / canvas_scale;
+                if let Some(ov) = self.text_overlays.iter_mut().find(|o| o.id() == *id) {
+                    let p = ov.position();
+                    ov.set_position(Position::new(p.x + dx, p.y + dy));
                 }
             }
         }
@@ -2820,6 +3012,9 @@ impl RobsApp {
                 // Annotation / mark-up overlay and tool interaction
                 self.render_annotations(ui, canvas_rect, canvas_scale);
 
+                // Text overlays (rendered on top of everything)
+                self.render_text_overlays(ui, canvas_rect, canvas_scale);
+
                 // Show recording indicator
                 if self.recording {
                     let live_rect = egui::Rect::from_min_size(
@@ -2843,6 +3038,7 @@ impl RobsApp {
         if self.show_audio || self.show_chat || self.show_stats || self.show_controls {
             egui::SidePanel::right("right_panel")
                 .default_width(300.0)
+                .min_width(120.0)
                 .resizable(true)
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -3055,8 +3251,8 @@ impl eframe::App for RobsApp {
         self.streaming_controls(ctx);
         self.scenes_panel(ctx);
         self.source_properties_modal(ctx);
-        self.preview_panel(ctx);
         self.right_panel(ctx);
+        self.preview_panel(ctx);
 
         if self.show_settings {
             self.show_settings_window(ctx);

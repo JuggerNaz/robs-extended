@@ -88,11 +88,11 @@ impl AnnotationShape {
     /// Glyph used as the toolbar icon.
     pub fn icon(&self) -> &'static str {
         match self {
-            AnnotationShape::Arrow => "➤",
-            AnnotationShape::Line => "／",
-            AnnotationShape::Rectangle => "▭",
-            AnnotationShape::Ellipse => "◯",
-            AnnotationShape::Pen => "✎",
+            AnnotationShape::Arrow => "->",
+            AnnotationShape::Line => "/",
+            AnnotationShape::Rectangle => "\u{25A0}",  // ■
+            AnnotationShape::Ellipse => "\u{25CB}",    // ○
+            AnnotationShape::Pen => "~",
             AnnotationShape::Text => "T",
         }
     }

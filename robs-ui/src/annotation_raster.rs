@@ -124,6 +124,50 @@ pub fn composite_annotations(
     }
 }
 
+/// Composite text overlays (with semi-transparent backgrounds) into an
+/// RGBA8 frame. `scale_x` / `scale_y` map overlay scene coordinates to
+/// frame pixels.
+pub fn composite_text_overlays(
+    frame: &mut [u8],
+    frame_w: u32,
+    frame_h: u32,
+    overlays: &[robs_core::TextOverlay],
+    scale_x: f32,
+    scale_y: f32,
+    font: Option<&FontVec>,
+) {
+    let font = match font {
+        Some(f) => f,
+        None => return,
+    };
+    for ov in overlays.iter().filter(|o| o.is_visible()) {
+        let text = ov.text();
+        if text.is_empty() {
+            continue;
+        }
+        let x = ov.position().x * scale_x;
+        let y = ov.position().y * scale_y;
+        let size = ov.font_size() * scale_x;
+        let c = ov.color();
+
+        // Semi-transparent background box for readability.
+        let est_w = text.len() as f32 * size * 0.6 + 8.0 * scale_x;
+        let est_h = size * 1.2 + 4.0 * scale_y;
+        fill_rect(
+            frame,
+            frame_w,
+            frame_h,
+            x - 4.0 * scale_x,
+            y - 2.0 * scale_y,
+            x - 4.0 * scale_x + est_w,
+            y - 2.0 * scale_y + est_h,
+            [0, 0, 0, 160],
+        );
+
+        render_text(frame, frame_w, frame_h, font, x, y, text, c, size);
+    }
+}
+
 /// Try to load a usable system TrueType font for rasterizing text into
 /// recordings. Returns `None` if no candidate could be read.
 pub fn load_system_font() -> Option<FontVec> {

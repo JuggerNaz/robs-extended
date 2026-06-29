@@ -12,6 +12,7 @@ use std::any::Any;
 use std::sync::Mutex;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Window info for enumeration
@@ -89,6 +90,105 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, _: LPARAM) -> BOOL {
     BOOL(1) // Continue enumeration
 }
 
+/// Capture a single frame from a window by HWND.
+///
+/// Uses `PrintWindow` with `PW_RENDERFULLCONTENT` first (captures
+/// hardware-accelerated / DirectX content), then falls back to `BitBlt`
+/// from the window DC for older renderers.
+///
+/// Returns `(bgra_data, width, height)` or `None` on failure.
+pub fn capture_window(hwnd: isize) -> Option<(Vec<u8>, u32, u32)> {
+    unsafe {
+        let hwnd = HWND(hwnd as *mut std::ffi::c_void);
+
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return None;
+        }
+
+        let width = (rect.right - rect.left) as u32;
+        let height = (rect.bottom - rect.top) as u32;
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        // Use a screen DC to create compatible GDI objects.
+        let screen_dc = GetDC(None);
+        if screen_dc.is_invalid() {
+            return None;
+        }
+
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        let bitmap = CreateCompatibleBitmap(screen_dc, width as i32, height as i32);
+        let old_bitmap = SelectObject(mem_dc, bitmap);
+
+        // Try PrintWindow with PW_RENDERFULLCONTENT (= 2) for
+        // hardware-accelerated content, then fall back to BitBlt.
+        let pw_ok = PrintWindow(hwnd, mem_dc, PRINT_WINDOW_FLAGS(2)).as_bool();
+        let blt_ok = if !pw_ok {
+            let hdc = GetWindowDC(hwnd);
+            if hdc.is_invalid() {
+                false
+            } else {
+                let r = BitBlt(
+                    mem_dc,
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    hdc,
+                    0,
+                    0,
+                    SRCCOPY,
+                )
+                .is_ok();
+                let _ = ReleaseDC(hwnd, hdc);
+                r
+            }
+        } else {
+            true
+        };
+
+        let result = if blt_ok {
+            let mut bmi = BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            };
+
+            let mut buffer = vec![0u8; (width * height * 4) as usize];
+            let got_bits = GetDIBits(
+                mem_dc,
+                bitmap,
+                0,
+                height,
+                Some(buffer.as_mut_ptr() as *mut _),
+                &mut bmi as *mut _ as *mut BITMAPINFO,
+                DIB_RGB_COLORS,
+            );
+
+            if got_bits == 0 {
+                None
+            } else {
+                Some((buffer, width, height))
+            }
+        } else {
+            None
+        };
+
+        let _ = SelectObject(mem_dc, old_bitmap);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(mem_dc);
+        let _ = ReleaseDC(None, screen_dc);
+
+        result
+    }
+}
+
 /// Window capture source using window handle
 pub struct WindowCaptureSource {
     id: SourceId,
@@ -121,88 +221,13 @@ impl WindowCaptureSource {
     
     /// Capture a frame from the window using GDI
     fn capture_frame(&mut self) -> Result<VideoFrame> {
-        unsafe {
-            let hwnd = HWND(self.hwnd as *mut std::ffi::c_void);
-            
-            // Get window rect
-            let mut rect = RECT::default();
-            let rect_ok = GetWindowRect(hwnd, &mut rect);
-            if rect_ok.is_err() {
-                anyhow::bail!("Failed to get window rect");
-            }
-            
-            let width = (rect.right - rect.left) as u32;
-            let height = (rect.bottom - rect.top) as u32;
-            
-            if width == 0 || height == 0 {
-                anyhow::bail!("Window has zero size");
-            }
-            
-            // Get window DC
-            let hdc = GetWindowDC(hwnd);
-            if hdc.is_invalid() {
-                anyhow::bail!("Failed to get DC");
-            }
-            
-            // Create compatible DC and bitmap
-            let mem_dc = CreateCompatibleDC(hdc);
-            let bitmap = CreateCompatibleBitmap(hdc, width as i32, height as i32);
-            let old_bitmap = SelectObject(mem_dc, bitmap);
-            
-            // BitBlt the window content
-            let bitblt_ok = BitBlt(
-                mem_dc,
-                0,
-                0,
-                width as i32,
-                height as i32,
-                hdc,
-                0,
-                0,
-                SRCCOPY,
-            );
-            
-            // Get the bitmap data
-            if bitblt_ok.is_ok() {
-                let mut bmi = BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width as i32,
-                    biHeight: -(height as i32), // Top-down
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                };
-                
-                let mut buffer = vec![0u8; (width * height * 4) as usize];
-                let got_bits = GetDIBits(
-                    mem_dc,
-                    bitmap,
-                    0,
-                    height,
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut bmi as *mut _ as *mut BITMAPINFO,
-                    DIB_RGB_COLORS,
-                );
-                
-                // Cleanup
-                let _ = SelectObject(mem_dc, old_bitmap);
-                let _ = DeleteObject(bitmap);
-                let _ = DeleteDC(mem_dc);
-                let _ = ReleaseDC(hwnd, hdc);
-                
-                if got_bits == 0 {
-                    anyhow::bail!("Failed to get bitmap bits");
-                }
-                
+        match capture_window(self.hwnd) {
+            Some((buffer, width, height)) => {
                 self.frame_count += 1;
                 let pts = (self.frame_count * 1000 / 30) as i64;
-                
-                // Update video info
                 self.video_info.width = width;
                 self.video_info.height = height;
-                
-                return Ok(VideoFrame {
+                Ok(VideoFrame {
                     width,
                     height,
                     format: PixelFormat::BGRA,
@@ -210,16 +235,11 @@ impl WindowCaptureSource {
                     pts,
                     duration: 33333,
                     linesize: vec![(width * 4) as usize],
-                });
+                })
             }
-            
-            // Cleanup on failure
-            let _ = SelectObject(mem_dc, old_bitmap);
-            let _ = DeleteObject(bitmap);
-            let _ = DeleteDC(mem_dc);
-            let _ = ReleaseDC(hwnd, hdc);
-            
-            anyhow::bail!("BitBlt failed");
+            None => {
+                anyhow::bail!("Window capture failed");
+            }
         }
     }
 }
