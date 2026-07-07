@@ -298,3 +298,107 @@ impl VideoSource for WindowCaptureSource {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Webcam capture via FFmpeg DirectShow (dshow)
+// ---------------------------------------------------------------------------
+
+/// Manages an FFmpeg process that captures from a DirectShow webcam device
+/// and continuously reads raw BGRA frames on a background thread.
+pub struct WebcamCapture {
+    child: Option<std::process::Child>,
+    frame_thread: Option<std::thread::JoinHandle<()>>,
+    latest_frame: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    width: u32,
+    height: u32,
+}
+
+impl WebcamCapture {
+    /// Spawn FFmpeg to capture from `device_name` at the given resolution/fps.
+    /// Returns `None` if FFmpeg fails to start.
+    pub fn new(device_name: &str, width: u32, height: u32, fps: f32) -> Option<Self> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("ffmpeg")
+            .args([
+                "-f", "dshow",
+                "-video_size", &format!("{}x{}", width, height),
+                "-framerate", &fps.to_string(),
+                "-i", &format!("video={}", device_name),
+                "-f", "rawvideo",
+                "-pix_fmt", "bgra",
+                "pipe:1",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+
+        let stdout = child.stdout.take()?;
+        let latest_frame =
+            std::sync::Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+        let stop_flag =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let lf = latest_frame.clone();
+        let sf = stop_flag.clone();
+        let frame_size = (width as usize) * (height as usize) * 4;
+
+        let handle = std::thread::spawn(move || {
+            let mut stdout = stdout;
+            loop {
+                if sf.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                let mut buf = vec![0u8; frame_size];
+                match stdout.read_exact(&mut buf) {
+                    Ok(()) => {
+                        if let Ok(mut frame) = lf.lock() {
+                            *frame = Some(buf);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Some(Self {
+            child: Some(child),
+            frame_thread: Some(handle),
+            latest_frame,
+            stop_flag,
+            width,
+            height,
+        })
+    }
+
+    /// Returns a clone of the latest captured frame (BGRA), or `None`.
+    pub fn capture_frame(&self) -> Option<(Vec<u8>, u32, u32)> {
+        let frame = self.latest_frame.lock().ok()?;
+        frame
+            .as_ref()
+            .map(|data| (data.clone(), self.width, self.height))
+    }
+
+    /// Shut down FFmpeg and join the reader thread.
+    pub fn stop(&mut self) {
+        self.stop_flag
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(handle) = self.frame_thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for WebcamCapture {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}

@@ -206,6 +206,41 @@ fn get_audio_devices() -> Vec<AudioDeviceInfo> {
     devices
 }
 
+/// Enumerate DirectShow video devices (webcams) via FFmpeg.
+fn get_video_devices() -> Vec<String> {
+    let mut devices = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+
+        if let Ok(output) = Command::new("ffmpeg")
+            .args(["-list_devices", "true", "-f", "dshow", "-i", "dummy"])
+            .stderr(std::process::Stdio::piped())
+            .output()
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            for line in stderr.lines() {
+                // FFmpeg 8.x format:  [in#0 @ ...] "Device Name" (video)
+                // FFmpeg <8 format:   "Device Name" (video)  (inside "DirectShow video devices" section)
+                if line.contains("(video)") && !line.contains("Alternative name") {
+                    if let Some(start) = line.find('"') {
+                        if let Some(end) = line[start + 1..].find('"') {
+                            let name = &line[start + 1..start + 1 + end];
+                            if !name.is_empty() && name.len() > 2 {
+                                devices.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    devices
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Panel {
     Preview,
@@ -217,11 +252,28 @@ enum Panel {
     Stats,
 }
 
+pub struct EventLogEntry {
+    timestamp: chrono::DateTime<chrono::Local>,
+    message: String,
+    kind: EventLogKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum EventLogKind {
+    Stream,
+    Record,
+    Info,
+    Annotation,
+    Overlay,
+}
+
 pub struct RobsApp {
     streaming: bool,
     recording: bool,
     recording_paused: bool,
     streaming_paused: bool,
+    event_log: Vec<EventLogEntry>,
+    show_event_log: bool,
     profile_manager: Arc<RwLock<ProfileManager>>,
     chat_messages: Arc<RwLock<VecDeque<UnifiedChatMessage>>>,
     chat_input: String,
@@ -323,6 +375,10 @@ pub struct RobsApp {
     record_font: Option<ab_glyph::FontVec>,
     // Maps scene-item IDs to window handles (HWND) for window-capture sources.
     window_hwnds: std::collections::HashMap<robs_core::SceneItemId, isize>,
+    // Active webcam capture sessions keyed by scene-item ID.
+    webcam_captures: std::collections::HashMap<robs_core::SceneItemId, robs_sources::native_capture::WebcamCapture>,
+    // Flag to capture a snapshot on the next preview frame.
+    take_snapshot: bool,
     // Text overlays (persistent on-screen text baked into recordings).
     text_overlays: Vec<robs_core::TextOverlay>,
     overlay_text_input: String,
@@ -433,6 +489,8 @@ impl RobsApp {
             recording: false,
             recording_paused: false,
             streaming_paused: false,
+            event_log: Vec::new(),
+            show_event_log: true,
             profile_manager: Arc::new(RwLock::new(ProfileManager::default())),
             chat_messages: Arc::new(RwLock::new(VecDeque::with_capacity(500))),
             chat_input: String::new(),
@@ -549,6 +607,8 @@ impl RobsApp {
             text_input: String::new(),
             record_font: None,
             window_hwnds: std::collections::HashMap::new(),
+            webcam_captures: std::collections::HashMap::new(),
+            take_snapshot: false,
             text_overlays: Vec::new(),
             overlay_text_input: String::new(),
         }
@@ -662,8 +722,28 @@ impl RobsApp {
                         let input = "desktop".to_string();
                         (input, mon_x, mon_y, mon_w, mon_h, false)
                     } else {
-                        eprintln!("[Recording] No capture source found in scene!");
-                        ("desktop".to_string(), 0, 0, 1920, 1080, false)
+                        // Check for webcam capture
+                        let cam_item = scene
+                            .items()
+                            .iter()
+                            .find(|i| i.is_visible() && i.name().starts_with("Video Capture:"));
+
+                        if let Some(item) = cam_item {
+                            let mut cam_w = 1280u32;
+                            let mut cam_h = 720u32;
+                            for part in item.name().split('|') {
+                                if let Some(val) = part.strip_prefix("w:") {
+                                    cam_w = val.parse().unwrap_or(1280);
+                                } else if let Some(val) = part.strip_prefix("h:") {
+                                    cam_h = val.parse().unwrap_or(720);
+                                }
+                            }
+                            eprintln!("[Recording] Found webcam source: {} ({}x{})", item.name(), cam_w, cam_h);
+                            ("webcam".to_string(), 0, 0, cam_w as i32, cam_h as i32, false)
+                        } else {
+                            eprintln!("[Recording] No capture source found in scene!");
+                            ("desktop".to_string(), 0, 0, 1920, 1080, false)
+                        }
                     }
                 }
             } else {
@@ -934,6 +1014,10 @@ impl RobsApp {
                 .unwrap_or_default()
                 .as_secs(),
         );
+        self.log_event(
+            format!("Recording started: {}", self.last_recording_path),
+            EventLogKind::Record,
+        );
     }
 
     fn stop_recording(&mut self) {
@@ -1025,6 +1109,10 @@ impl RobsApp {
         }
 
         self.recording_start_time = None;
+        self.log_event(
+            format!("Recording stopped ({})", duration_str),
+            EventLogKind::Record,
+        );
     }
 
     fn start_preview_capture(&mut self) {
@@ -1206,7 +1294,8 @@ impl RobsApp {
                     .filter(|i| {
                         i.is_visible()
                             && (i.name().starts_with("Window:")
-                                || i.name().starts_with("Display Capture"))
+                                || i.name().starts_with("Display Capture")
+                                || i.name().starts_with("Video Capture:"))
                     })
                     .map(|i| (i.id(), i.name().to_string()))
                     .collect()
@@ -1261,6 +1350,11 @@ impl RobsApp {
                         {
                             self.send_frame_to_recording(&rgba_data, width, height);
                         }
+
+                        if self.take_snapshot {
+                            self.save_snapshot(&rgba_data, width, height);
+                            self.take_snapshot = false;
+                        }
                     }
                 }
             } else if item_name.starts_with("Display Capture") {
@@ -1305,16 +1399,60 @@ impl RobsApp {
                     if self.recording && !self.recording_paused && self.recording_frame_sender.is_some() {
                         self.send_frame_to_recording(&rgba_data, width, height);
                     }
+
+                    if self.take_snapshot {
+                        self.save_snapshot(&rgba_data, width, height);
+                        self.take_snapshot = false;
+                    }
+                }
+            } else if item_name.starts_with("Video Capture:") {
+                // Webcam capture via FFmpeg dshow background process
+                if let Some(wc) = self.webcam_captures.get_mut(item_id) {
+                    if let Some((data, width, height)) = wc.capture_frame() {
+                        let mut rgba_data = data;
+                        for chunk in rgba_data.chunks_exact_mut(4) {
+                            chunk.swap(0, 2); // BGRA -> RGBA
+                        }
+
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            [width as usize, height as usize],
+                            &rgba_data,
+                        );
+
+                        if let Some(texture) = self.preview_textures.get_mut(&texture_key) {
+                            texture.set(color_image, egui::TextureOptions::LINEAR);
+                        } else {
+                            let texture = ctx.load_texture(
+                                format!("preview_{:?}", texture_key),
+                                color_image,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.preview_textures.insert(texture_key, texture);
+                        }
+
+                        if self.recording && !self.recording_paused
+                            && self.recording_frame_sender.is_some()
+                        {
+                            self.send_frame_to_recording(&rgba_data, width, height);
+                        }
+
+                        if self.take_snapshot {
+                            self.save_snapshot(&rgba_data, width, height);
+                            self.take_snapshot = false;
+                        }
+                    }
                 }
             }
         }
 
-        // Clean up textures and hwnd mappings for sources that no longer exist
+        // Clean up textures, hwnd mappings, and webcam captures for sources that no longer exist
         let active_ids: std::collections::HashSet<SceneItemId> =
             capture_items.iter().map(|(id, _)| *id).collect();
         self.preview_textures
             .retain(|id, _| active_ids.contains(id));
         self.window_hwnds
+            .retain(|id, _| active_ids.contains(id));
+        self.webcam_captures
             .retain(|id, _| active_ids.contains(id));
     }
 
@@ -1379,6 +1517,36 @@ impl RobsApp {
         format!("{:02}:{:02}:{:02}", h, m, s)
     }
 
+    fn log_event(&mut self, message: impl Into<String>, kind: EventLogKind) {
+        let entry = EventLogEntry {
+            timestamp: chrono::Local::now(),
+            message: message.into(),
+            kind,
+        };
+        self.event_log.push(entry);
+        if self.event_log.len() > 200 {
+            self.event_log.remove(0);
+        }
+    }
+
+    fn save_snapshot(&mut self, rgba: &[u8], width: u32, height: u32) {
+        let dir = std::env::var("USERPROFILE")
+            .map(|p| format!("{}\\Videos\\Snapshots", p))
+            .unwrap_or_else(|_| "Snapshots".to_string());
+        let _ = std::fs::create_dir_all(&dir);
+        let ts = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let path = format!("{}\\ROBS_Snapshot_{}.png", dir, ts);
+
+        if let Some(img) = image::RgbaImage::from_raw(width, height, rgba.to_vec()) {
+            if img.save(&path).is_ok() {
+                self.log_event(
+                    format!("Snapshot saved: {}", path),
+                    EventLogKind::Info,
+                );
+            }
+        }
+    }
+
     fn menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -1415,6 +1583,7 @@ impl RobsApp {
                     ui.checkbox(&mut self.show_audio, "Audio Mixer");
                     ui.checkbox(&mut self.show_chat, "Chat");
                     ui.checkbox(&mut self.show_stats, "Stats");
+                    ui.checkbox(&mut self.show_event_log, "Event Log");
                     ui.separator();
                     ui.checkbox(&mut self.show_annotations, "Annotations Toolbar");
                 });
@@ -1543,88 +1712,6 @@ impl RobsApp {
             let panel_h = ui.available_height();
             ui.horizontal(|ui| {
                 ui.set_min_height(panel_h - 6.0);
-                // ---- Streaming controls ----
-                let (stream_icon, stream_label, stream_color) = if !self.streaming {
-                    ("\u{25B6}", "Stream", egui::Color32::from_rgb(0, 170, 0))
-                } else if self.streaming_paused {
-                    ("\u{25B6}", "Resume", egui::Color32::from_rgb(0, 170, 0))
-                } else {
-                    ("\u{23F8}", "Pause", egui::Color32::from_rgb(210, 160, 0))
-                };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(format!("{} {}", stream_icon, stream_label))
-                                .color(stream_color)
-                                .strong(),
-                        ),
-                    )
-                    .clicked()
-                {
-                    if !self.streaming {
-                        self.streaming = true;
-                        self.streaming_time = 0;
-                        self.streaming_paused = false;
-                    } else if self.streaming_paused {
-                        self.streaming_paused = false;
-                    } else {
-                        self.streaming_paused = true;
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        self.streaming,
-                        egui::Button::new(
-                            egui::RichText::new("\u{23F9} Stop").color(egui::Color32::RED),
-                        ),
-                    )
-                    .clicked()
-                {
-                    self.streaming = false;
-                    self.streaming_paused = false;
-                }
-
-                ui.separator();
-
-                // ---- Recording controls ----
-                let (rec_icon, rec_label, rec_color) = if !self.recording {
-                    ("\u{25B6}", "Record", egui::Color32::from_rgb(0, 170, 0))
-                } else if self.recording_paused {
-                    ("\u{25B6}", "Resume", egui::Color32::from_rgb(0, 170, 0))
-                } else {
-                    ("\u{23F8}", "Pause", egui::Color32::from_rgb(210, 160, 0))
-                };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(format!("{} {}", rec_icon, rec_label))
-                                .color(rec_color)
-                                .strong(),
-                        ),
-                    )
-                    .clicked()
-                {
-                    if !self.recording {
-                        self.start_recording();
-                    } else if self.recording_paused {
-                        self.recording_paused = false;
-                    } else {
-                        self.recording_paused = true;
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        self.recording,
-                        egui::Button::new(
-                            egui::RichText::new("\u{23F9} Stop").color(egui::Color32::RED),
-                        ),
-                    )
-                    .clicked()
-                {
-                    self.stop_recording();
-                }
-
-                ui.separator();
                 ui.label(format!("Scene: {}", self.current_scene));
                 ui.separator();
                 ui.label("Easting \n 987687.21 m");
@@ -1947,7 +2034,8 @@ impl RobsApp {
             } else {
                 ui.label(egui::RichText::new("AAC not available").color(egui::Color32::YELLOW));
             }
-        });
+            });
+
     }
 
     fn settings_outputs(&mut self, ui: &mut egui::Ui) {
@@ -2147,6 +2235,40 @@ impl RobsApp {
                                     }
                                 }
                             });
+                            ui.menu_button("Video Capture Device", |ui| {
+                                let cameras = get_video_devices();
+                                if cameras.is_empty() {
+                                    ui.label("No webcam devices found");
+                                } else {
+                                    ui.label("Select Device:");
+                                    for cam in &cameras {
+                                        if ui.button(cam).clicked() {
+                                            if let Some(scene) = self.scenes.current_scene_mut() {
+                                                let source_id =
+                                                    SourceId(robs_core::types::ObjectId::new());
+                                                let item_id = scene.add_source(
+                                                    source_id,
+                                                    format!("Video Capture: {}|w:1280|h:720", cam),
+                                                );
+                                                self.log_event(
+                                                    format!("Video source added: {}", cam),
+                                                    EventLogKind::Info,
+                                                );
+                                                let wc = robs_sources::native_capture::WebcamCapture::new(
+                                                    cam, 1280, 720, 30.0,
+                                                );
+                                                if wc.is_none() {
+                                                    eprintln!("[Webcam] Failed to start capture for: {}", cam);
+                                                }
+                                                if let Some(wc) = wc {
+                                                    self.webcam_captures.insert(item_id, wc);
+                                                }
+                                            }
+                                            ui.close_menu();
+                                        }
+                                    }
+                                }
+                            });
                         });
 
                         // Display sources in current scene - get items first
@@ -2197,7 +2319,9 @@ impl RobsApp {
                             ui.horizontal(|ui| {
                                 ui.checkbox(&mut visible, "");
                                 // Show a clean display name and truncate to fit panel width.
-                                let display_name = if item_name.starts_with("Display Capture") {
+                                let display_name = if item_name.starts_with("Display Capture")
+                                    || item_name.starts_with("Video Capture:")
+                                {
                                     item_name.split('|').next().unwrap_or(&item_name).to_string()
                                 } else {
                                     item_name.clone()
@@ -2277,9 +2401,9 @@ impl RobsApp {
                                     .desired_rows(3),
                             );
                             if ui.button("Add").clicked() && !self.overlay_text_input.trim().is_empty() {
-                                self.text_overlays.push(robs_core::TextOverlay::new(
-                                    self.overlay_text_input.trim().to_string(),
-                                ));
+                                let text = self.overlay_text_input.trim().to_string();
+                                self.log_event(format!("Text overlay added: \"{}\"", text), EventLogKind::Overlay);
+                                self.text_overlays.push(robs_core::TextOverlay::new(text));
                                 self.overlay_text_input.clear();
                             }
                         });
@@ -2557,6 +2681,7 @@ impl RobsApp {
                 if resp.drag_released() {
                     if let Some(ann) = self.annotation_drawing.take() {
                         if ann.points().len() > 1 {
+                            self.log_event("Annotation added: Pen", EventLogKind::Annotation);
                             self.annotations.push(ann);
                         }
                     }
@@ -2578,6 +2703,7 @@ impl RobsApp {
                             scene_pos,
                         );
                         ann.set_style(self.annotation_style);
+                        self.log_event("Annotation added: Text", EventLogKind::Annotation);
                         self.annotations.push(ann);
                         let new_id = self.annotations.last().map(|a| a.id());
                         self.editing_text_id = new_id;
@@ -2649,6 +2775,8 @@ impl RobsApp {
                     if let Some(ann) = self.annotation_drawing.take() {
                         let (w, h) = ann.size();
                         if w > 2.0 || h > 2.0 {
+                            let shape_name = format!("{:?}", ann.shape());
+                            self.log_event(format!("Annotation added: {}", shape_name), EventLogKind::Annotation);
                             self.annotations.push(ann);
                         }
                     }
@@ -2782,7 +2910,18 @@ impl RobsApp {
     fn preview_panel(&mut self, ctx: &egui::Context) {
         if self.show_preview {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let rect = ui.available_rect_before_wrap();
+                let full_rect = ui.available_rect_before_wrap();
+
+                // Reserve space at bottom for the quick actions bar
+                let actions_height = 52.0;
+                let actions_rect = egui::Rect::from_min_size(
+                    egui::pos2(full_rect.min.x, full_rect.max.y - actions_height),
+                    egui::vec2(full_rect.width(), actions_height),
+                );
+                let rect = egui::Rect::from_min_max(
+                    full_rect.min,
+                    egui::pos2(full_rect.max.x, full_rect.max.y - actions_height),
+                );
 
                 // Draw background
                 ui.painter()
@@ -2854,11 +2993,20 @@ impl RobsApp {
 
                         // Determine source dimensions
                         let (src_w, src_h) = if name.starts_with("Display Capture") {
-                            // Parse actual monitor dimensions from source name
                             let (_, _, w, h) = parse_monitor_coords(&name);
                             (w as f32, h as f32)
+                        } else if name.starts_with("Video Capture:") {
+                            let mut w = 1280.0f32;
+                            let mut h = 720.0f32;
+                            for part in name.split('|') {
+                                if let Some(val) = part.strip_prefix("w:") {
+                                    w = val.parse().unwrap_or(1280.0);
+                                } else if let Some(val) = part.strip_prefix("h:") {
+                                    h = val.parse().unwrap_or(720.0);
+                                }
+                            }
+                            (w, h)
                         } else {
-                            // Window capture - use scene output resolution as default
                             (scene_output_w as f32, scene_output_h as f32)
                         };
 
@@ -2896,6 +3044,8 @@ impl RobsApp {
                             // Placeholder: draw colored rect with source name
                             let color = if name.starts_with("Display Capture") {
                                 egui::Color32::from_rgb(40, 60, 80)
+                            } else if name.starts_with("Video Capture:") {
+                                egui::Color32::from_rgb(50, 70, 50)
                             } else {
                                 egui::Color32::from_rgb(60, 40, 80)
                             };
@@ -3030,18 +3180,264 @@ impl RobsApp {
                         egui::Color32::WHITE,
                     );
                 }
+            
+                // ---- Quick Actions bar (below the preview) ----
+                ui.allocate_ui_at_rect(actions_rect, |ui| {
+                    ui.painter().rect_filled(
+                        actions_rect,
+                        0.0,
+                        egui::Color32::from_rgb(35, 35, 35),
+                    );
+                    ui.painter().hline(
+                        actions_rect.min.x..=actions_rect.max.x,
+                        actions_rect.min.y,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)),
+                    );
+                    ui.add_space(7.0);
+                    ui.horizontal_centered(|ui| {
+                        
+                        ui.add_space(10.0);
+
+                        let (rec_icon, rec_label, rec_color) = if !self.recording {
+                            ("\u{25B6}", "START", egui::Color32::from_rgb(0, 140, 60))
+                        } else if self.recording_paused {
+                            ("\u{25B6}", "RESUME", egui::Color32::from_rgb(0, 140, 60))
+                        } else {
+                            ("\u{23F8}", "PAUSE", egui::Color32::from_rgb(200, 150, 0))
+                        };
+                        let rec_response = ui.allocate_exact_size(
+                            egui::vec2(56.0, 46.0),
+                            egui::Sense::click(),
+                        );
+                        let (rec_rect, _) = rec_response;
+                        let rec_resp = &rec_response.1;
+                        let rec_fill = if rec_resp.hovered() {
+                            rec_color.linear_multiply(1.2)
+                        } else {
+                            rec_color
+                        };
+                        ui.painter().rect_filled(rec_rect, 4.0, rec_fill);
+                        ui.painter().text(
+                            egui::pos2(rec_rect.center().x, rec_rect.min.y + 16.0),
+                            egui::Align2::CENTER_CENTER,
+                            rec_icon,
+                            egui::FontId::proportional(22.0),
+                            egui::Color32::WHITE,
+                        );
+                        ui.painter().text(
+                            egui::pos2(rec_rect.center().x, rec_rect.max.y - 9.0),
+                            egui::Align2::CENTER_CENTER,
+                            rec_label,
+                            egui::FontId::proportional(9.0),
+                            egui::Color32::WHITE,
+                        );
+                        if rec_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if rec_resp.clicked() {
+                            if !self.recording {
+                                self.start_recording();
+                            } else if self.recording_paused {
+                                self.recording_paused = false;
+                                self.log_event("Recording resumed", EventLogKind::Record);
+                            } else {
+                                self.recording_paused = true;
+                                self.log_event("Recording paused", EventLogKind::Record);
+                            }
+                        }
+
+                        let stop_response = ui.allocate_exact_size(
+                            egui::vec2(56.0, 46.0),
+                            egui::Sense::click(),
+                        );
+                        let (stop_rect, _) = stop_response;
+                        let stop_resp = &stop_response.1;
+                        let stop_color = egui::Color32::from_rgb(180, 0, 0);
+                        let stop_fill = if stop_resp.hovered() {
+                            stop_color.linear_multiply(1.2)
+                        } else {
+                            stop_color
+                        };
+                        ui.painter().rect_filled(stop_rect, 4.0, stop_fill);
+                        ui.painter().text(
+                            egui::pos2(stop_rect.center().x, stop_rect.min.y + 16.0),
+                            egui::Align2::CENTER_CENTER,
+                            "\u{25A0}",
+                            egui::FontId::proportional(22.0),
+                            egui::Color32::WHITE,
+                        );
+                        ui.painter().text(
+                            egui::pos2(stop_rect.center().x, stop_rect.max.y - 9.0),
+                            egui::Align2::CENTER_CENTER,
+                            "STOP",
+                            egui::FontId::proportional(9.0),
+                            egui::Color32::WHITE,
+                        );
+                        if stop_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if stop_resp.clicked() {
+                            if self.recording {
+                                self.stop_recording();
+                            }
+                        }
+
+                        ui.separator();
+
+                        let (str_label, str_color) = if !self.streaming {
+                            ("STREAM", egui::Color32::from_rgb(0, 110, 180))
+                        } else if self.streaming_paused {
+                            ("RESUME", egui::Color32::from_rgb(0, 110, 180))
+                        } else {
+                            ("PAUSE", egui::Color32::from_rgb(200, 150, 0))
+                        };
+                        if ui.add_sized(
+                            [72.0, 28.0],
+                            egui::Button::new(
+                                egui::RichText::new(str_label).color(egui::Color32::WHITE).strong(),
+                            ).fill(str_color),
+                        ).clicked() {
+                            if !self.streaming {
+                                self.streaming = true;
+                                self.streaming_time = 0;
+                                self.streaming_paused = false;
+                                self.log_event("Streaming started", EventLogKind::Stream);
+                            } else if self.streaming_paused {
+                                self.streaming_paused = false;
+                                self.log_event("Streaming resumed", EventLogKind::Stream);
+                            } else {
+                                self.streaming_paused = true;
+                                self.log_event("Streaming paused", EventLogKind::Stream);
+                            }
+                        }
+
+                        ui.separator();
+
+                        if ui.add_sized(
+                            [80.0, 28.0],
+                            egui::Button::new(
+                                egui::RichText::new("SNAPSHOT").color(egui::Color32::WHITE).strong(),
+                            ).fill(egui::Color32::from_rgb(40, 80, 160)),
+                        ).clicked() {
+                            self.take_snapshot = true;
+                        }
+
+                        if ui.add_sized(
+                            [80.0, 28.0],
+                            egui::Button::new(
+                                egui::RichText::new("MARK").color(egui::Color32::WHITE).strong(),
+                            ).fill(egui::Color32::from_rgb(180, 110, 0)),
+                        ).clicked() {
+                            self.log_event(
+                                format!("Marker #{} added", self.event_log.len()),
+                                EventLogKind::Info,
+                            );
+                        }
+
+                        if ui.add_sized(
+                            [90.0, 28.0],
+                            egui::Button::new(
+                                egui::RichText::new("BOOKMARK").color(egui::Color32::WHITE).strong(),
+                            ).fill(egui::Color32::from_rgb(120, 80, 160)),
+                        ).clicked() {
+                            self.log_event("Bookmark added", EventLogKind::Info);
+                        }
+                    });
+                });
             });
         }
     }
 
     fn right_panel(&mut self, ctx: &egui::Context) {
-        if self.show_audio || self.show_chat || self.show_stats || self.show_controls {
+        if self.show_audio || self.show_chat || self.show_stats || self.show_controls || self.show_event_log {
             egui::SidePanel::right("right_panel")
                 .default_width(300.0)
                 .min_width(120.0)
                 .resizable(true)
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
+                        if self.show_event_log {
+                            let log_count = self.event_log.len();
+                            ui.add_space(8.0);
+                            egui::Frame::group(ui.style())
+                                .fill(egui::Color32::from_rgb(28, 28, 32))
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 80)))
+                                .rounding(egui::Rounding::same(4.0))
+                                .inner_margin(egui::Margin::same(6.0))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.add_space(5.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("EVENT LOG ({})", log_count))
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(200, 200, 210)),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.menu_button(
+                                                    egui::RichText::new("...").color(egui::Color32::from_rgb(160, 160, 170)),
+                                                    |ui| {
+                                                        if ui.button("Clear Log").clicked() {
+                                                            self.event_log.clear();
+                                                            ui.close_menu();
+                                                        }
+                                                    },
+                                                );
+                                            },
+                                        );
+                                    });
+                                    ui.add_space(5.0);
+                                    let header_bottom = ui.min_rect().max.y;
+                                    ui.painter().hline(
+                                        ui.min_rect().min.x..=ui.min_rect().max.x,
+                                        header_bottom + 2.0,
+                                        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 80)),
+                                    );
+                                    ui.add_space(10.0);
+                                    egui::ScrollArea::vertical()
+                                        .max_height(220.0)
+                                        .stick_to_bottom(true)
+                                        .show(ui, |ui| {
+                                            if self.event_log.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new("No events yet")
+                                                        .color(egui::Color32::from_rgb(90, 90, 90))
+                                                        .italics(),
+                                                );
+                                            } else {
+                                                let entries: Vec<_> = self.event_log.iter().rev().collect();
+                                                let total = entries.len();
+                                                for (idx, entry) in entries.iter().enumerate() {
+                                                    let time_str = entry.timestamp.format("%H:%M:%S").to_string();
+                                                    let color = match entry.kind {
+                                                        EventLogKind::Stream => egui::Color32::from_rgb(100, 180, 255),
+                                                        EventLogKind::Record => egui::Color32::from_rgb(255, 130, 130),
+                                                        EventLogKind::Annotation => egui::Color32::from_rgb(180, 220, 130),
+                                                        EventLogKind::Overlay => egui::Color32::from_rgb(220, 190, 255),
+                                                        EventLogKind::Info => egui::Color32::from_rgb(180, 180, 180),
+                                                    };
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(&time_str)
+                                                                .color(egui::Color32::from_rgb(120, 160, 120))
+                                                                .monospace(),
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new(&entry.message).color(color),
+                                                        );
+                                                    });
+                                                    if idx < total - 1 {
+                                                        ui.separator();
+                                                    }
+                                                }
+                                            }
+                                        });
+                                });
+                            ui.add_space(4.0);
+                        }
+
                         if self.show_controls {
                             ui.collapsing("Controls", |ui| {
                                 ui.vertical_centered(|ui| {
@@ -3060,10 +3456,13 @@ impl RobsApp {
                                             self.streaming = true;
                                             self.streaming_time = 0;
                                             self.streaming_paused = false;
+                                            self.log_event("Streaming started", EventLogKind::Stream);
                                         } else if self.streaming_paused {
                                             self.streaming_paused = false;
+                                            self.log_event("Streaming resumed", EventLogKind::Stream);
                                         } else {
                                             self.streaming_paused = true;
+                                            self.log_event("Streaming paused", EventLogKind::Stream);
                                         }
                                     }
                                     if ui.add_enabled(
@@ -3072,6 +3471,7 @@ impl RobsApp {
                                     ).clicked() {
                                         self.streaming = false;
                                         self.streaming_paused = false;
+                                        self.log_event("Streaming stopped", EventLogKind::Stream);
                                     }
 
                                     ui.separator();
@@ -3091,8 +3491,10 @@ impl RobsApp {
                                             self.start_recording();
                                         } else if self.recording_paused {
                                             self.recording_paused = false;
+                                            self.log_event("Recording resumed", EventLogKind::Record);
                                         } else {
                                             self.recording_paused = true;
+                                            self.log_event("Recording paused", EventLogKind::Record);
                                         }
                                     }
                                     if ui.add_enabled(
@@ -3214,6 +3616,8 @@ impl RobsApp {
                                 });
                             });
                         }
+
+                        // --- Event Log section moved to top ---
                     });
                 });
         }
@@ -3235,7 +3639,8 @@ impl eframe::App for RobsApp {
                 s.items().iter().any(|i| {
                     i.is_visible()
                         && (i.name().starts_with("Window:")
-                            || i.name().starts_with("Display Capture"))
+                            || i.name().starts_with("Display Capture")
+                            || i.name().starts_with("Video Capture:"))
                 })
             })
             .unwrap_or(false);
