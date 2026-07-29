@@ -1,12 +1,10 @@
 use anyhow::Result;
 use directories::ProjectDirs;
-use parking_lot::RwLock;
 use robs_core::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

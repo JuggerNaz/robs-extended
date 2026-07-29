@@ -1,4 +1,4 @@
-use super::scene_item::{Crop, Position, Scale};
+use super::scene_item::{Crop, Scale};
 use crate::traits::VideoFrame;
 use crate::types::PixelFormat;
 
@@ -166,7 +166,7 @@ pub fn crop_frame(frame: &VideoFrame, crop: &Crop) -> VideoFrame {
 /// Scale a video frame to the target dimensions using bilinear interpolation
 pub fn scale_frame(
     frame: &VideoFrame,
-    scale: Scale,
+    _scale: Scale,
     target_width: u32,
     target_height: u32,
 ) -> VideoFrame {
@@ -320,7 +320,6 @@ pub fn render_scene<F>(scene: &super::Scene, get_frame: F, output: &mut VideoFra
 where
     F: Fn(crate::types::SourceId) -> Option<VideoFrame>,
 {
-    let (out_width, out_height) = scene.output_size();
     let bg = scene.background_color();
 
     // Clear output to background color

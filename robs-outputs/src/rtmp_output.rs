@@ -8,6 +8,7 @@ use parking_lot::RwLock;
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
 
+#[allow(dead_code)]
 pub struct RtmpOutput {
     id: OutputId,
     name: String,

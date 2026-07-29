@@ -1,13 +1,12 @@
 use robs_core::traits::*;
-use robs_core::*;
 use anyhow::Result;
-use async_trait::async_trait;
 use std::sync::Arc;
 use parking_lot::RwLock;
 use flume::{Sender, Receiver, unbounded};
 use tokio::sync::Notify;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
+#[allow(dead_code)]
 pub struct MultiDestinationOutput {
     outputs: Vec<Arc<RwLock<Box<dyn Output>>>>,
     packet_tx: Sender<EncodedPacket>,

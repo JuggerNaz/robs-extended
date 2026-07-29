@@ -1,9 +1,6 @@
 use crate::types::*;
-use crate::traits::*;
 use serde::{Deserialize, Serialize};
 use flume::{Sender, Receiver, unbounded};
-use std::sync::Arc;
-use parking_lot::RwLock;
 
 pub type EventTx = Sender<RobsEvent>;
 pub type EventRx = Receiver<RobsEvent>;

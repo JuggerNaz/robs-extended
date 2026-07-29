@@ -1,0 +1,447 @@
+//! Central preview panel: scene-item rendering, drag/resize, annotation overlay,
+//! and the quick-actions bar. Extracted verbatim from `app.rs`.
+
+use super::super::state::EventLogKind;
+use super::super::RobsApp;
+use eframe::egui;
+use robs_core::scene::{CaptureSource, Position, Scale};
+
+impl RobsApp {
+    pub(crate) fn preview_panel(&mut self, ctx: &egui::Context) {
+        if self.show_preview {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let full_rect = ui.available_rect_before_wrap();
+
+                // Reserve space at bottom for the quick actions bar
+                let actions_height = 52.0;
+                let actions_rect = egui::Rect::from_min_size(
+                    egui::pos2(full_rect.min.x, full_rect.max.y - actions_height),
+                    egui::vec2(full_rect.width(), actions_height),
+                );
+                let rect = egui::Rect::from_min_max(
+                    full_rect.min,
+                    egui::pos2(full_rect.max.x, full_rect.max.y - actions_height),
+                );
+
+                // Draw background
+                ui.painter()
+                    .rect_filled(rect, 2.0, egui::Color32::from_rgb(30, 30, 30));
+
+                // Get scene and calculate canvas area
+                let scene = self.scenes.current_scene();
+                let (scene_output_w, scene_output_h) =
+                    scene.map(|s| s.output_size()).unwrap_or((1920, 1080));
+
+                // Calculate preview canvas size (fit scene output into available rect)
+                let available_size = rect.size();
+                let scale_x = available_size.x / scene_output_w as f32;
+                let scale_y = available_size.y / scene_output_h as f32;
+                let canvas_scale = scale_x.min(scale_y) * 0.95;
+
+                let canvas_w = scene_output_w as f32 * canvas_scale;
+                let canvas_h = scene_output_h as f32 * canvas_scale;
+                let canvas_off_x = (available_size.x - canvas_w) / 2.0;
+                let canvas_off_y = (available_size.y - canvas_h) / 2.0;
+
+                let canvas_rect = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(canvas_off_x, canvas_off_y),
+                    egui::vec2(canvas_w, canvas_h),
+                );
+
+                // Draw canvas border
+                ui.painter().rect_stroke(
+                    canvas_rect,
+                    2.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)),
+                );
+
+                // A draw tool overrides source-item dragging so the canvas is
+                // free for drawing annotations.
+                let draw_active =
+                    self.annotation.show_annotations && self.annotation.annotation_tool.shape().is_some();
+
+                // Render scene items
+                if let Some(scene) = scene {
+                    // Collect items to avoid borrow issues
+                    let items: Vec<_> = scene
+                        .items()
+                        .iter()
+                        .map(|i| {
+                            let pos = i.position();
+                            let scale = i.scale();
+                            let crop = i.crop();
+                            (
+                                i.id(),
+                                i.name().to_string(),
+                                i.capture().cloned(),
+                                i.is_visible(),
+                                pos.x,
+                                pos.y,
+                                scale.x,
+                                scale.y,
+                                crop.left,
+                                crop.top,
+                                crop.right,
+                                crop.bottom,
+                            )
+                        })
+                        .collect();
+
+                    for (id, name, capture, visible, px, py, sx, sy, _cl, _ct, _cr, _cb) in items {
+                        if !visible {
+                            continue;
+                        }
+
+                        // Determine source dimensions from typed metadata. Window
+                        // capture resolves its size dynamically, so fall back to the
+                        // scene output size for it (and for non-capture sources).
+                        let (src_w, src_h) = match &capture {
+                            Some(c) => match c.native_size() {
+                                Some((w, h)) => (w as f32, h as f32),
+                                None => (scene_output_w as f32, scene_output_h as f32),
+                            },
+                            None => (scene_output_w as f32, scene_output_h as f32),
+                        };
+
+                        if src_w == 0.0 || src_h == 0.0 {
+                            continue;
+                        }
+
+                        // Calculate rendered size after scaling
+                        let render_w = src_w * sx;
+                        let render_h = src_h * sy;
+
+                        // Calculate position on canvas (scene coords -> canvas coords)
+                        let item_x = canvas_rect.min.x + px * canvas_scale;
+                        let item_y = canvas_rect.min.y + py * canvas_scale;
+                        let item_w = render_w * canvas_scale;
+                        let item_h = render_h * canvas_scale;
+
+                        let item_rect = egui::Rect::from_min_size(
+                            egui::pos2(item_x, item_y),
+                            egui::vec2(item_w, item_h),
+                        );
+
+                        // Draw source content - look up texture by SceneItemId
+                        if let Some(texture) = self.preview.preview_textures.get(&id) {
+                            ui.painter().image(
+                                texture.id(),
+                                item_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                egui::Color32::WHITE,
+                            );
+                        } else {
+                            // Placeholder: draw colored rect with source name
+                            let color = match &capture {
+                                Some(CaptureSource::Display { .. }) => {
+                                    egui::Color32::from_rgb(40, 60, 80)
+                                }
+                                Some(CaptureSource::Webcam { .. }) => {
+                                    egui::Color32::from_rgb(50, 70, 50)
+                                }
+                                Some(CaptureSource::Window { .. }) | None => {
+                                    egui::Color32::from_rgb(60, 40, 80)
+                                }
+                            };
+                            ui.painter().rect_filled(item_rect, 2.0, color);
+                            ui.painter().text(
+                                item_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                &name,
+                                egui::FontId::proportional(12.0),
+                                egui::Color32::LIGHT_GRAY,
+                            );
+                        }
+
+                        // Draw selection border
+                        ui.painter().rect_stroke(
+                            item_rect,
+                            2.0,
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 120, 255)),
+                        );
+
+                        // Make item draggable (disabled while drawing annotations)
+                        if !draw_active {
+                            let response = ui.interact(
+                                item_rect,
+                                ui.make_persistent_id(format!("source_item_{}", id.0 .0)),
+                                egui::Sense::drag(),
+                            );
+
+                            if response.dragged() {
+                                let drag_delta = response.drag_delta();
+                                let delta_scene_x = drag_delta.x / canvas_scale;
+                                let delta_scene_y = drag_delta.y / canvas_scale;
+
+                                if let Some(scene) = self.scenes.current_scene_mut() {
+                                    if let Some(item) = scene.item_mut(id) {
+                                        let pos = item.position();
+                                        item.set_position(Position::new(
+                                            pos.x + delta_scene_x,
+                                            pos.y + delta_scene_y,
+                                        ));
+                                    }
+                                }
+                            }
+
+                            // Draw resize handles at corners
+                            let handle_size = 8.0;
+                            let corners = [
+                                (item_rect.min, "tl"),
+                                (egui::pos2(item_rect.max.x, item_rect.min.y), "tr"),
+                                (egui::pos2(item_rect.min.x, item_rect.max.y), "bl"),
+                                (item_rect.max, "br"),
+                            ];
+
+                            for (corner, corner_name) in corners {
+                                let handle_rect = egui::Rect::from_center_size(
+                                    corner,
+                                    egui::vec2(handle_size, handle_size),
+                                );
+                                ui.painter()
+                                    .rect_filled(handle_rect, 1.0, egui::Color32::WHITE);
+                                ui.painter().rect_stroke(
+                                    handle_rect,
+                                    1.0,
+                                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 120, 255)),
+                                );
+
+                                // Make corner handle draggable for resize
+                                let drag_response = ui.interact(
+                                    handle_rect,
+                                    ui.make_persistent_id(format!(
+                                        "resize_{}_{}",
+                                        id.0 .0, corner_name
+                                    )),
+                                    egui::Sense::drag(),
+                                );
+
+                                if drag_response.dragged() {
+                                    let drag_delta = drag_response.drag_delta();
+                                    let delta_w = drag_delta.x / canvas_scale;
+                                    let delta_h = drag_delta.y / canvas_scale;
+
+                                    if let Some(scene) = self.scenes.current_scene_mut() {
+                                        if let Some(item) = scene.item_mut(id) {
+                                            let scale = item.scale();
+                                            let new_sx = (scale.x + delta_w / src_w).max(0.01);
+                                            let new_sy = (scale.y + delta_h / src_h).max(0.01);
+                                            item.set_scale(Scale::new(new_sx, new_sy));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Draw source label
+                        ui.painter().text(
+                            egui::pos2(item_rect.min.x, item_rect.min.y - 16.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            &name,
+                            egui::FontId::proportional(11.0),
+                            egui::Color32::from_rgb(180, 180, 180),
+                        );
+                    }
+                } else {
+                    let center = rect.center();
+                    ui.painter().text(
+                        center,
+                        egui::Align2::CENTER_CENTER,
+                        "No Active Scene",
+                        egui::FontId::proportional(24.0),
+                        egui::Color32::GRAY,
+                    );
+                }
+
+                // Annotation / mark-up overlay and tool interaction
+                self.render_annotations(ui, canvas_rect, canvas_scale);
+
+                // Text overlays (rendered on top of everything)
+                self.render_text_overlays(ui, canvas_rect, canvas_scale);
+
+                // Show recording indicator
+                if self.record.recording {
+                    let live_rect = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(10.0, 10.0),
+                        egui::vec2(60.0, 25.0),
+                    );
+                    ui.painter().rect_filled(live_rect, 4.0, egui::Color32::RED);
+                    ui.painter().text(
+                        live_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "REC",
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::WHITE,
+                    );
+                }
+
+                // ---- Quick Actions bar (below the preview) ----
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(actions_rect), |ui| {
+                    ui.painter().rect_filled(
+                        actions_rect,
+                        0.0,
+                        egui::Color32::from_rgb(35, 35, 35),
+                    );
+                    ui.painter().hline(
+                        actions_rect.min.x..=actions_rect.max.x,
+                        actions_rect.min.y,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)),
+                    );
+                    ui.add_space(7.0);
+                    ui.horizontal_centered(|ui| {
+
+                        ui.add_space(10.0);
+
+                        let (rec_icon, rec_label, rec_color) = if !self.record.recording {
+                            ("\u{25B6}", "START", egui::Color32::from_rgb(0, 140, 60))
+                        } else if self.record.recording_paused {
+                            ("\u{25B6}", "RESUME", egui::Color32::from_rgb(0, 140, 60))
+                        } else {
+                            ("\u{23F8}", "PAUSE", egui::Color32::from_rgb(200, 150, 0))
+                        };
+                        let rec_response = ui.allocate_exact_size(
+                            egui::vec2(56.0, 46.0),
+                            egui::Sense::click(),
+                        );
+                        let (rec_rect, _) = rec_response;
+                        let rec_resp = &rec_response.1;
+                        let rec_fill = if rec_resp.hovered() {
+                            rec_color.linear_multiply(1.2)
+                        } else {
+                            rec_color
+                        };
+                        ui.painter().rect_filled(rec_rect, 4.0, rec_fill);
+                        ui.painter().text(
+                            egui::pos2(rec_rect.center().x, rec_rect.min.y + 16.0),
+                            egui::Align2::CENTER_CENTER,
+                            rec_icon,
+                            egui::FontId::proportional(22.0),
+                            egui::Color32::WHITE,
+                        );
+                        ui.painter().text(
+                            egui::pos2(rec_rect.center().x, rec_rect.max.y - 9.0),
+                            egui::Align2::CENTER_CENTER,
+                            rec_label,
+                            egui::FontId::proportional(9.0),
+                            egui::Color32::WHITE,
+                        );
+                        if rec_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if rec_resp.clicked() {
+                            if !self.record.recording {
+                                self.start_recording();
+                            } else if self.record.recording_paused {
+                                self.record.recording_paused = false;
+                                self.log_event("Recording resumed", EventLogKind::Record);
+                            } else {
+                                self.record.recording_paused = true;
+                                self.log_event("Recording paused", EventLogKind::Record);
+                            }
+                        }
+
+                        let stop_response = ui.allocate_exact_size(
+                            egui::vec2(56.0, 46.0),
+                            egui::Sense::click(),
+                        );
+                        let (stop_rect, _) = stop_response;
+                        let stop_resp = &stop_response.1;
+                        let stop_color = egui::Color32::from_rgb(180, 0, 0);
+                        let stop_fill = if stop_resp.hovered() {
+                            stop_color.linear_multiply(1.2)
+                        } else {
+                            stop_color
+                        };
+                        ui.painter().rect_filled(stop_rect, 4.0, stop_fill);
+                        ui.painter().text(
+                            egui::pos2(stop_rect.center().x, stop_rect.min.y + 16.0),
+                            egui::Align2::CENTER_CENTER,
+                            "\u{25A0}",
+                            egui::FontId::proportional(22.0),
+                            egui::Color32::WHITE,
+                        );
+                        ui.painter().text(
+                            egui::pos2(stop_rect.center().x, stop_rect.max.y - 9.0),
+                            egui::Align2::CENTER_CENTER,
+                            "STOP",
+                            egui::FontId::proportional(9.0),
+                            egui::Color32::WHITE,
+                        );
+                        if stop_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if stop_resp.clicked() {
+                            if self.record.recording {
+                                self.stop_recording();
+                            }
+                        }
+
+                        ui.separator();
+
+                        let (str_label, str_color) = if !self.streaming {
+                            ("STREAM", egui::Color32::from_rgb(0, 110, 180))
+                        } else if self.streaming_paused {
+                            ("RESUME", egui::Color32::from_rgb(0, 110, 180))
+                        } else {
+                            ("PAUSE", egui::Color32::from_rgb(200, 150, 0))
+                        };
+                        if ui.add_sized(
+                            [72.0, 28.0],
+                            egui::Button::new(
+                                egui::RichText::new(str_label).color(egui::Color32::WHITE).strong(),
+                            ).fill(str_color),
+                        ).clicked() {
+                            if !self.streaming {
+                                self.streaming = true;
+                                self.streaming_time = 0;
+                                self.streaming_paused = false;
+                                self.log_event("Streaming started", EventLogKind::Stream);
+                            } else if self.streaming_paused {
+                                self.streaming_paused = false;
+                                self.log_event("Streaming resumed", EventLogKind::Stream);
+                            } else {
+                                self.streaming_paused = true;
+                                self.log_event("Streaming paused", EventLogKind::Stream);
+                            }
+                        }
+
+                        ui.separator();
+
+                        if ui.add_sized(
+                            [80.0, 28.0],
+                            egui::Button::new(
+                                egui::RichText::new("SNAPSHOT").color(egui::Color32::WHITE).strong(),
+                            ).fill(egui::Color32::from_rgb(40, 80, 160)),
+                        ).clicked() {
+                            self.take_snapshot = true;
+                        }
+
+                        if ui.add_sized(
+                            [80.0, 28.0],
+                            egui::Button::new(
+                                egui::RichText::new("MARK").color(egui::Color32::WHITE).strong(),
+                            ).fill(egui::Color32::from_rgb(180, 110, 0)),
+                        ).clicked() {
+                            self.log_event(
+                                format!("Marker #{} added", self.event_log.len()),
+                                EventLogKind::Info,
+                            );
+                        }
+
+                        if ui.add_sized(
+                            [90.0, 28.0],
+                            egui::Button::new(
+                                egui::RichText::new("BOOKMARK").color(egui::Color32::WHITE).strong(),
+                            ).fill(egui::Color32::from_rgb(120, 80, 160)),
+                        ).clicked() {
+                            self.log_event("Bookmark added", EventLogKind::Info);
+                        }
+                    });
+                });
+            });
+        }
+    }
+}

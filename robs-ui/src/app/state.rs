@@ -1,0 +1,128 @@
+//! Support types extracted out of `app.rs`.
+//!
+//! These describe devices, audio channels, the active-panel enum, and the
+//! event-log entry types. They are crate-internal: only `robs-ui` (and in
+//! particular the `app` module tree) needs them.
+
+#[derive(Clone)]
+pub(crate) struct MonitorInfo {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub is_primary: bool,
+    pub position_x: i32,
+    pub position_y: i32,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct AudioDeviceInfo {
+    pub name: String,
+    pub id: String,
+    pub is_input: bool, // true = microphone/aux, false = desktop audio/speakers
+}
+
+#[derive(Clone)]
+pub(crate) struct AudioChannel {
+    pub name: String,
+    pub volume: f32,
+    pub muted: bool,
+    pub device_id: String, // device ID or "disabled" or "default"
+    pub is_desktop: bool,  // true = desktop audio, false = mic/aux
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+pub(crate) enum Panel {
+    Preview,
+    Sources,
+    Scenes,
+    Controls,
+    AudioMixer,
+    Chat,
+    Stats,
+}
+
+pub(crate) struct EventLogEntry {
+    pub timestamp: chrono::DateTime<chrono::Local>,
+    pub message: String,
+    pub kind: EventLogKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum EventLogKind {
+    Stream,
+    Record,
+    Info,
+    Annotation,
+    Overlay,
+}
+
+/// Recording-session runtime state.
+///
+/// `last_frame_time` and `frame_count` replace the former `static mut`
+/// `LAST_RECORDING_FRAME` / `FRAME_COUNT` in `send_frame_to_recording`, which
+/// were read and written without synchronization and therefore undefined
+/// behavior. They are now ordinary fields reached only through `&mut self` on
+/// the UI thread (the spawned writer thread never touches them — it only drains
+/// the frame channel into FFmpeg's stdin).
+#[allow(dead_code)]
+pub(crate) struct RecordState {
+    pub(crate) recording: bool,
+    pub(crate) recording_paused: bool,
+    pub(crate) recording_time: u64,
+    pub(crate) recording_start_time: Option<u64>,
+    pub(crate) last_recording_path: String,
+    pub(crate) recording_file_output: Option<robs_outputs::FileOutput>,
+    pub(crate) ffmpeg_recording_handle: Option<std::process::Child>,
+    pub(crate) recording_dxgi_thread: Option<std::thread::JoinHandle<()>>,
+    pub(crate) recording_stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) recording_frame_sender: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    pub(crate) recording_ffmpeg_stdin: Option<std::process::ChildStdin>,
+    pub(crate) last_frame_time: Option<std::time::Instant>,
+    pub(crate) frame_count: u64,
+}
+
+/// Live preview-capture state: per-source frame buffers, GPU textures, and the
+/// capture-rate throttle.
+#[allow(dead_code)]
+pub(crate) struct PreviewState {
+    pub(crate) preview_capture_active: bool,
+    pub(crate) preview_frame_sender: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    pub(crate) preview_frame_receiver: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    pub(crate) preview_capture_handle: Option<std::process::Child>,
+    pub(crate) preview_frame_count: u64,
+    pub(crate) last_preview_capture: std::time::Instant,
+    pub(crate) frame_buffer: std::collections::HashMap<String, Vec<u8>>,
+    pub(crate) preview_textures:
+        std::collections::HashMap<robs_core::SceneItemId, eframe::egui::TextureHandle>,
+}
+
+/// Annotation / markup tool state.
+pub(crate) struct AnnotationState {
+    pub(crate) show_annotations: bool,
+    pub(crate) annotations: Vec<robs_core::Annotation>,
+    pub(crate) annotation_tool: robs_core::AnnotationTool,
+    pub(crate) annotation_style: robs_core::AnnotationStyle,
+    pub(crate) annotation_drawing: Option<robs_core::Annotation>,
+    pub(crate) selected_annotation: Option<robs_core::AnnotationId>,
+    pub(crate) editing_text_id: Option<robs_core::AnnotationId>,
+    pub(crate) text_input: String,
+    pub(crate) record_font: Option<ab_glyph::FontVec>,
+}
+
+/// Source-properties modal editing state.
+pub(crate) struct EditingState {
+    pub(crate) show_source_properties: bool,
+    pub(crate) editing_source_id: Option<robs_core::SceneItemId>,
+    pub(crate) editing_source_name: String,
+    pub(crate) editing_source_pos_x: f32,
+    pub(crate) editing_source_pos_y: f32,
+    pub(crate) editing_source_scale_x: f32,
+    pub(crate) editing_source_scale_y: f32,
+    pub(crate) editing_source_rotation: f32,
+    pub(crate) editing_source_crop_left: u32,
+    pub(crate) editing_source_crop_top: u32,
+    pub(crate) editing_source_crop_right: u32,
+    pub(crate) editing_source_crop_bottom: u32,
+}

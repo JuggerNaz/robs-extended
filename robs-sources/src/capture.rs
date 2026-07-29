@@ -4,8 +4,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::any::Any;
 use std::process::{Command, Stdio};
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
 
 /// Monitor capture source using FFmpeg gdigrab
 pub struct MonitorCaptureSource {

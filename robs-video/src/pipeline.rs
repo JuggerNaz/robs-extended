@@ -1,10 +1,9 @@
 use robs_core::*;
-use robs_core::traits::*;
 use anyhow::Result;
-use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+#[allow(dead_code)]
 pub struct VideoPipelineProcessor {
     sources: Vec<Arc<Mutex<Box<dyn VideoSource>>>>,
     output_format: PixelFormat,
@@ -57,11 +56,11 @@ impl VideoRenderer {
         Self { width, height, format }
     }
     
-    pub fn render(&mut self, sources: &[&VideoFrame]) -> VideoFrame {
+    pub fn render(&mut self, _sources: &[&VideoFrame]) -> VideoFrame {
         VideoFrame::new(self.width, self.height, self.format)
     }
     
-    pub fn scale(&self, input: &VideoFrame, output_width: u32, output_height: u32) -> VideoFrame {
+    pub fn scale(&self, _input: &VideoFrame, output_width: u32, output_height: u32) -> VideoFrame {
         VideoFrame::new(output_width, output_height, self.format)
     }
     

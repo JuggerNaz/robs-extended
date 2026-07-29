@@ -5,10 +5,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 use parking_lot::RwLock;
 use std::sync::Arc;
-use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
-use futures::StreamExt;
-use std::collections::HashMap;
 
+#[allow(dead_code)]
 pub struct TwitchChatConnection {
     channel: String,
     oauth_token: Option<String>,
@@ -17,6 +15,7 @@ pub struct TwitchChatConnection {
     event_tx: Sender<ChatEvent>,
 }
 
+#[allow(dead_code)]
 impl TwitchChatConnection {
     pub fn new(channel: String, oauth_token: Option<String>, username: Option<String>, event_tx: Sender<ChatEvent>) -> Self {
         Self {

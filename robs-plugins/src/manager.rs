@@ -2,7 +2,6 @@ use crate::{Plugin, PluginInfo, UnknownPlugin};
 use anyhow::Result;
 use parking_lot::RwLock;
 use robs_core::registry::*;
-use robs_core::traits::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;

@@ -1,6 +1,5 @@
 use anyhow::Result;
 use robs_core::traits::*;
-use robs_core::*;
 
 pub struct PluginInfo {
     pub name: String,

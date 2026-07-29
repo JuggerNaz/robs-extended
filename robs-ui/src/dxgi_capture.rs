@@ -178,7 +178,7 @@ impl DxgiCaptureManager {
                         position
                     );
                     // Remove the dead capturer
-                    if let Some(info) = self.monitors.remove(&position) {
+                    if let Some(_info) = self.monitors.remove(&position) {
                         eprintln!("[DXGI] Removed dead capturer for {:?}", position);
                         // Try to re-enumerate all monitors to recreate capturers
                         match self.enumerate_outputs() {

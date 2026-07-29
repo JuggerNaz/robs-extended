@@ -1,3 +1,4 @@
+use super::capture_source::CaptureSource;
 use crate::types::{ObjectId, SceneItemId, SourceId};
 use serde::{Deserialize, Serialize};
 
@@ -133,6 +134,9 @@ pub struct SceneItem {
     // State
     visible: bool,
     locked: bool,
+
+    // Typed capture-source metadata (`None` for non-capture sources).
+    capture: Option<CaptureSource>,
 }
 
 impl SceneItem {
@@ -153,6 +157,7 @@ impl SceneItem {
             crop: Crop::none(),
             visible: true,
             locked: false,
+            capture: None,
         }
     }
 
@@ -209,6 +214,11 @@ impl SceneItem {
         self.locked
     }
 
+    /// Typed capture-source metadata for this item, if any.
+    pub fn capture(&self) -> Option<&CaptureSource> {
+        self.capture.as_ref()
+    }
+
     // Setters
     pub fn set_position(&mut self, position: Position) {
         if !self.locked {
@@ -261,6 +271,11 @@ impl SceneItem {
 
     pub fn set_locked(&mut self, locked: bool) {
         self.locked = locked;
+    }
+
+    /// Set the typed capture-source metadata for this item.
+    pub fn set_capture(&mut self, capture: Option<CaptureSource>) {
+        self.capture = capture;
     }
 
     /// Get the source name (for UI display)

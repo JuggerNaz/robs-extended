@@ -1,6 +1,5 @@
 use crate::types::*;
 use crate::traits::*;
-use crate::event::*;
 use anyhow::Result;
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -153,6 +152,7 @@ impl VideoPipeline {
     }
 }
 
+#[allow(dead_code)]
 pub struct AudioPipeline {
     track: TrackId,
     sources: HashMap<SourceId, Arc<RwLock<Box<dyn AudioSource>>>>,
@@ -203,6 +203,7 @@ impl AudioPipeline {
 
 pub struct AudioMixer {
     sample_rate: u32,
+    #[allow(dead_code)]
     channels: usize,
 }
 

@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
 use parking_lot::RwLock;
 use std::sync::Arc;
-use chrono::{DateTime, Utc};
 
+#[allow(dead_code)]
 pub struct YouTubeChatConnection {
     channel_id: String,
     live_chat_id: Option<String>,

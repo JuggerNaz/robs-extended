@@ -3,7 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Arc;
-use serde::{Serialize, Deserialize};
+use serde::Serialize;
 
 #[async_trait]
 pub trait Source: Send + Sync {
@@ -116,7 +116,7 @@ impl VideoFrame {
         }
     }
     
-    fn calculate_linesize(width: u32, height: u32, format: PixelFormat) -> Vec<usize> {
+    fn calculate_linesize(width: u32, _height: u32, format: PixelFormat) -> Vec<usize> {
         match format {
             PixelFormat::RGBA | PixelFormat::BGRA => vec![(width * 4) as usize],
             PixelFormat::Rgb24 | PixelFormat::Bgr24 => vec![(width * 3) as usize],

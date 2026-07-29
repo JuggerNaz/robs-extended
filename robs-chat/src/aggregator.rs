@@ -5,7 +5,6 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
-use async_trait::async_trait;
 
 pub struct ChatAggregator {
     connections: RwLock<Vec<Arc<dyn ChatConnection>>>,

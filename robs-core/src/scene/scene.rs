@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use super::scene_item::{Alignment, BoundsType, Crop, Position, Scale, SceneItem};
 use crate::types::{ObjectId, SceneId, SceneItemId, SourceId};
