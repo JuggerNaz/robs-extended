@@ -244,6 +244,11 @@ impl RobsApp {
             };
 
             if let Some((data, width, height)) = frame {
+                // Blackbox tap: feed the raw BGRA frame to the always-on safety
+                // recorder BEFORE the preview path swaps it to RGBA (ffmpeg
+                // consumes BGRA natively). Non-blocking; no-op without an engine.
+                self.submit_blackbox_frame(&data, width, height);
+
                 // Convert BGRA -> RGBA (DXGI / GDI / webcam all return BGRA).
                 let mut rgba_data = data;
                 for chunk in rgba_data.chunks_exact_mut(4) {

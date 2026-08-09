@@ -27,6 +27,7 @@ impl RobsApp {
                         "Hotkeys",
                         "Streaming",
                         "Outputs",
+                        "Blackbox",
                     ]
                     .iter()
                     .enumerate()
@@ -51,6 +52,7 @@ impl RobsApp {
                                 3 => self.settings_hotkeys(ui),
                                 4 => self.settings_streaming(ui),
                                 5 => self.settings_outputs(ui),
+                                6 => self.settings_blackbox(ui),
                                 _ => {}
                             }
                         });
@@ -354,11 +356,178 @@ impl RobsApp {
                         )
                         .pick_folder()
                     {
-                        self.recording_path = path.to_string_lossy().into_owned();
+                    self.recording_path = path.to_string_lossy().into_owned();
+                }
+            }
+            });
+            ui.end_row();
+        });
+    }
+
+    fn settings_blackbox(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Blackbox Safety Recorder");
+        ui.separator();
+        ui.label(
+            egui::RichText::new(
+                "Always-on background recorder. Runs independently of the Record \
+                 button whenever a capture source is active, writing rotating \
+                 Matroska segments for crash-safe recovery.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+
+        egui::Grid::new("settings_blackbox").show(ui, |ui| {
+            // Master switch binds to the live `enabled` field (what sync reads)
+            // and mirrors into the persisted settings.
+            ui.checkbox(&mut self.blackbox.enabled, "Enable blackbox recorder");
+            self.blackbox.settings.enabled = self.blackbox.enabled;
+            ui.end_row();
+
+            ui.label("Encoder:");
+            egui::ComboBox::from_id_salt("blackbox_encoder")
+                .selected_text(&self.blackbox.settings.encoder)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.blackbox.settings.encoder,
+                        "libx264".to_string(),
+                        "libx264 (software)",
+                    );
+                    ui.selectable_value(
+                        &mut self.blackbox.settings.encoder,
+                        "h264_nvenc".to_string(),
+                        "h264_nvenc (NVIDIA hardware)",
+                    );
+                });
+            ui.end_row();
+
+            ui.label("Output directory:");
+            ui.horizontal(|ui| {
+                let display = if self.blackbox.settings.output_dir.is_empty() {
+                    "(recording path / Blackbox)".to_string()
+                } else {
+                    self.blackbox.settings.output_dir.clone()
+                };
+                ui.label(display);
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_directory(
+                            std::env::var("USERPROFILE")
+                                .unwrap_or_else(|_| "C:\\Users".to_string()),
+                        )
+                        .pick_folder()
+                    {
+                        self.blackbox.settings.output_dir =
+                            path.to_string_lossy().into_owned();
                     }
                 }
             });
             ui.end_row();
+
+            ui.label("Segment length:");
+            ui.add(
+                egui::Slider::new(&mut self.blackbox.settings.segment_duration_secs, 60..=3600)
+                    .suffix(" s"),
+            );
+            ui.end_row();
+
+            ui.label("Segment size cap:");
+            ui.add(
+                egui::Slider::new(&mut self.blackbox.settings.segment_size_mb, 64..=4096)
+                    .suffix(" MiB"),
+            );
+            ui.end_row();
+
+            ui.label("CRF (x264):");
+            ui.add(egui::Slider::new(&mut self.blackbox.settings.crf, 0..=51));
+            ui.end_row();
+
+            ui.label("Bitrate (nvenc):");
+            ui.add(
+                egui::Slider::new(
+                    &mut self.blackbox.settings.video_bitrate_kbps,
+                    500..=50000,
+                )
+                .suffix(" kbps"),
+            );
+            ui.end_row();
+
+            ui.label("Disk low warning:");
+            ui.add(
+                egui::Slider::new(&mut self.blackbox.settings.disk_low_warn_percent, 5..=50)
+                    .suffix("%"),
+            );
+            ui.end_row();
+
+            ui.label("Disk critical pause:");
+            ui.add(
+                egui::Slider::new(&mut self.blackbox.settings.disk_low_critical_percent, 1..=20)
+                    .suffix("%"),
+            );
+            ui.end_row();
+
+            ui.label("Max retention:");
+            ui.add(
+                egui::Slider::new(&mut self.blackbox.settings.max_retention_gb, 0..=200)
+                    .suffix(" GiB (0 = unlimited)"),
+            );
+            ui.end_row();
+
+            ui.label("Stall threshold:");
+            ui.add(
+                egui::Slider::new(&mut self.blackbox.settings.stall_threshold_secs, 1..=120)
+                    .suffix(" s"),
+            );
+            ui.end_row();
         });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Status:").strong());
+            let st = &self.blackbox.status;
+            if !self.blackbox.enabled {
+                ui.label("disabled");
+            } else if !st.running {
+                ui.label("idle (no capture source)");
+            } else if st.disk_paused {
+                ui.label(
+                    egui::RichText::new("disk full — ingestion paused")
+                        .color(egui::Color32::from_rgb(210, 160, 0)),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("recording").color(egui::Color32::from_rgb(60, 200, 120)),
+                );
+            }
+
+            let running = self
+                .blackbox
+                .engine
+                .as_ref()
+                .map(|e| e.is_running())
+                .unwrap_or(false);
+            if running && ui.button("Apply & restart recorder").clicked() {
+                // Stop now; the next update() tick rebuilds the engine from the
+                // (possibly edited) settings with a fresh segment.
+                self.stop_blackbox();
+            }
+        });
+
+        if let Some(e) = &self.blackbox.status.last_error {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(format!("Last error: {e}")).color(egui::Color32::from_rgb(200, 90, 90)));
+        }
+
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Most changes take effect on the next capture start. Toggling \
+                 Enable applies immediately. Container is fixed to mkv for \
+                 crash-safety.",
+            )
+            .small()
+            .weak(),
+        );
     }
 }

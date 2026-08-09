@@ -37,6 +37,8 @@ impl RobsApp {
                         ui.label(rec_text);
                         ui.label(Self::format_time(self.record.recording_time));
                     }
+                    // Blackbox safety-recorder health chip (no-op when disabled/idle).
+                    self.blackbox_status_chip(ui);
                 });
             });
             ui.add_space(2.0);

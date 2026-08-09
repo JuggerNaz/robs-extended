@@ -13,6 +13,7 @@
 //! within their own submodule stay private.
 
 mod annotations;
+mod blackbox;
 mod capture;
 mod devices;
 mod panels;
@@ -31,8 +32,8 @@ use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
 use robs_profiles::profile::ProfileManager;
 use state::{
-    AnnotationState, AudioChannel, AudioDeviceInfo, EditingState, EventLogEntry, EventLogKind,
-    Panel, PreviewState, RecordState,
+    AnnotationState, AudioChannel, AudioDeviceInfo, BlackboxState, EditingState, EventLogEntry,
+    EventLogKind, Panel, PreviewState, RecordState,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -120,6 +121,8 @@ pub struct RobsApp {
     // Text overlays (persistent on-screen text baked into recordings).
     text_overlays: Vec<robs_core::TextOverlay>,
     overlay_text_input: String,
+    // Always-on background safety recorder.
+    blackbox: BlackboxState,
 }
 
 impl RobsApp {
@@ -299,6 +302,24 @@ impl RobsApp {
             snapshot_flash: None,
             text_overlays: Vec::new(),
             overlay_text_input: String::new(),
+            blackbox: {
+                let (bus, rx) = robs_core::EventBus::new();
+                let mut settings = robs_profiles::settings::BlackboxSettings::default();
+                // Default the encoder to the best available hardware/software.
+                if detection.nvenc_available {
+                    settings.encoder = "h264_nvenc".into();
+                } else {
+                    settings.encoder = "libx264".into();
+                }
+                BlackboxState {
+                    enabled: settings.enabled,
+                    settings,
+                    engine: None,
+                    status: robs_core::event::BlackboxStatus::default(),
+                    event_tx: bus.tx(),
+                    event_rx: Some(rx),
+                }
+            },
         }
     }
 
@@ -337,6 +358,16 @@ impl RobsApp {
             if t.elapsed() > std::time::Duration::from_millis(2000) {
                 self.snapshot_flash = None;
             }
+        }
+
+        // Drain Blackbox engine events: refresh the status snapshot and log
+        // notable events. Collect first, then mutate, to avoid holding an
+        // immutable borrow of `event_rx` across the `&mut self` log calls.
+        let blackbox_events = self.drain_blackbox_events();
+        if !blackbox_events.is_empty() {
+            self.apply_blackbox_events(blackbox_events);
+            // Status updates arrive ~1/s; keep the UI repainting so the chip/bar stay live.
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
     }
 
@@ -403,10 +434,10 @@ impl eframe::App for RobsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events(ctx);
 
-        // Process preview frames (recording now hooks into this - no separate capture needed)
-        self.process_preview_frames(ctx);
-
-        // Manage preview capture based on source visibility
+        // Determine whether the current scene has a visible capture source.
+        // Computed up-front so both the preview-capture lifecycle and the
+        // Blackbox engine can react within the same tick, before frames are
+        // processed/tapped.
         let has_capture_source = self
             .scenes
             .current_scene()
@@ -417,6 +448,15 @@ impl eframe::App for RobsApp {
             })
             .unwrap_or(false);
 
+        // Start/stop the always-on Blackbox engine based on capture state.
+        // Done before process_preview_frames so the engine is guaranteed to
+        // be running when the per-frame tap fires.
+        self.sync_blackbox_engine(has_capture_source);
+
+        // Process preview frames (recording + blackbox tap hook into this).
+        self.process_preview_frames(ctx);
+
+        // Manage preview capture based on source visibility.
         if has_capture_source && !self.preview.preview_capture_active {
             self.start_preview_capture();
         } else if !has_capture_source && self.preview.preview_capture_active {

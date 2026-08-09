@@ -111,6 +111,26 @@ pub(crate) struct AnnotationState {
     pub(crate) record_font: Option<ab_glyph::FontVec>,
 }
 
+/// Always-on Blackbox Dual Recording Engine state.
+///
+/// Owns the engine (lazily (re)built from `settings`), the latest published
+/// status snapshot, and the event channel the engine reports through. The UI
+/// drains `event_rx` each frame to refresh `status` and log notable events.
+pub(crate) struct BlackboxState {
+    /// Master on/off. Honored live: toggling off stops a running engine.
+    pub(crate) enabled: bool,
+    /// Editable settings; projected into a fresh `BlackboxConfig` whenever the
+    /// engine (re)starts, so most edits take effect on the next start.
+    pub(crate) settings: robs_profiles::settings::BlackboxSettings,
+    /// The engine, if it has ever been started this session.
+    pub(crate) engine: Option<robs_outputs::BlackboxEngine>,
+    /// Latest health snapshot (refreshed from events).
+    pub(crate) status: robs_core::event::BlackboxStatus,
+    /// Event channel the engine publishes on.
+    pub(crate) event_tx: robs_core::event::EventTx,
+    pub(crate) event_rx: Option<robs_core::event::EventRx>,
+}
+
 /// Source-properties modal editing state.
 pub(crate) struct EditingState {
     pub(crate) show_source_properties: bool,
