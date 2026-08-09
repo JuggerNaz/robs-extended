@@ -14,8 +14,67 @@ pub enum RobsEvent {
     Scene(SceneEvent),
     Profile(ProfileEvent),
     Chat(ChatEvent),
+    Blackbox(BlackboxEvent),
     Error(ErrorEvent),
     Log(LogEvent),
+}
+
+/// Events emitted by the always-on Blackbox Dual Recording Engine.
+///
+/// These flow through the normal [`EventBus`] so the UI and any future
+/// monitoring consumers can react to recording failures, low disk space, and
+/// segment rotation without coupling to the engine internals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BlackboxEvent {
+    Started,
+    Stopped,
+    SegmentStarted { path: String, index: u64 },
+    SegmentClosed { path: String, index: u64, bytes: u64, duration_ms: u64 },
+    StorageLow { free_bytes: u64, total_bytes: u64, free_percent: f32 },
+    StorageCritical { free_bytes: u64, total_bytes: u64 },
+    Stalled { seconds_idle: u64 },
+    Recovered { path: String },
+    Error { message: String },
+    StatusUpdated { status: BlackboxStatus },
+}
+
+/// A snapshot of the Blackbox engine's runtime health. Published periodically
+/// (and on state changes) via [`BlackboxEvent::StatusUpdated`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BlackboxStatus {
+    /// Engine is running (worker thread alive).
+    pub running: bool,
+    /// Engine is actively receiving frames from a capture source.
+    pub capturing: bool,
+    /// Ingestion is paused because the target disk is critically full.
+    pub disk_paused: bool,
+    /// Index of the segment currently being written (0-based).
+    pub current_segment_index: u64,
+    /// Total number of finalized segments since the engine started.
+    pub segments_written: u64,
+    /// Cumulative encoded bytes written across finalized segments + the active one.
+    pub bytes_written: u64,
+    /// Frames dropped due to a full channel or disk pause (never blocks the UI).
+    pub dropped_frames: u64,
+    /// Wall-clock duration the engine has been actively capturing, in ms.
+    pub total_duration_ms: u64,
+    /// Output path of the segment currently being written, if any.
+    pub current_segment_path: Option<String>,
+    /// Last non-transient error message, if any.
+    pub last_error: Option<String>,
+    /// Storage health for the target disk.
+    pub storage: BlackboxStorageStatus,
+}
+
+/// Disk-space snapshot for the Blackbox output directory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BlackboxStorageStatus {
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+    /// Percentage of the disk that is free (0.0–100.0). 0.0 when total is unknown.
+    pub free_percent: f32,
+    pub low_warning: bool,
+    pub critical: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

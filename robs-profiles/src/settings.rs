@@ -1,5 +1,79 @@
 use serde::{Deserialize, Serialize};
 
+/// Settings for the always-on Blackbox Dual Recording Engine. Local-only for
+/// now; the `cloud` field is reserved so a future cloud-archive sink can be
+/// configured without a schema migration.
+///
+/// See `robs-outputs::blackbox::BlackboxConfig` for the runtime struct these
+/// are projected into.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlackboxSettings {
+    /// Master switch. When false, the engine never starts.
+    pub enabled: bool,
+    /// Output directory. Empty => a `Blackbox/` subdir under the configured
+    /// recording path (resolved by the UI).
+    pub output_dir: String,
+    /// Rotate a segment after this many seconds of capture.
+    pub segment_duration_secs: u64,
+    /// Rotate a segment after roughly this many MiB of raw input.
+    pub segment_size_mb: u64,
+    /// ffmpeg encoder id: `"libx264"` (software) or `"h264_nvenc"` (hardware).
+    pub encoder: String,
+    /// Container. Fixed to mkv for crash-safety; kept configurable for parity
+    /// with the main recorder's settings shape.
+    pub container: String,
+    /// CRF used by the software (x264) path.
+    pub crf: u8,
+    /// Bitrate in kbps used by the nvenc CBR path.
+    pub video_bitrate_kbps: u32,
+    /// Emit a `StorageLow` warning when free disk drops below this percent.
+    pub disk_low_warn_percent: u8,
+    /// Pause ingestion when free disk drops below this percent.
+    pub disk_low_critical_percent: u8,
+    /// Hard cap on total on-disk blackbox storage in GiB (0 = unlimited).
+    pub max_retention_gb: u32,
+    /// Emit a `Stalled` event after this many seconds with no incoming frames.
+    pub stall_threshold_secs: u64,
+    /// Reserved for a future cloud-archive sink. Ignored today.
+    pub cloud: serde_json::Value,
+}
+
+impl Default for BlackboxSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            output_dir: String::new(),
+            segment_duration_secs: 900, // 15 min
+            segment_size_mb: 512,
+            encoder: "libx264".into(),
+            container: "mkv".into(),
+            crf: 28,
+            video_bitrate_kbps: 2500,
+            disk_low_warn_percent: 10,
+            disk_low_critical_percent: 3,
+            max_retention_gb: 10,
+            stall_threshold_secs: 10,
+            cloud: serde_json::Value::Null,
+        }
+    }
+}
+
+impl BlackboxSettings {
+    pub fn load_or_default() -> Self {
+        Self::default()
+    }
+}
+
+impl AppSettings {
+    pub fn load_or_default() -> Self {
+        Self::default()
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub general: GeneralSettings,
@@ -7,6 +81,7 @@ pub struct AppSettings {
     pub audio: AudioSettings,
     pub hotkeys: Vec<HotkeyBinding>,
     pub ui: UiSettings,
+    pub blackbox: BlackboxSettings,
 }
 
 impl Default for AppSettings {
@@ -17,6 +92,7 @@ impl Default for AppSettings {
             audio: AudioSettings::default(),
             hotkeys: Vec::new(),
             ui: UiSettings::default(),
+            blackbox: BlackboxSettings::default(),
         }
     }
 }
@@ -227,15 +303,5 @@ impl HotkeyBinding {
             key: key.to_string(),
             modifiers: modifiers.into_iter().map(String::from).collect(),
         }
-    }
-}
-
-impl AppSettings {
-    pub fn load_or_default() -> Self {
-        Self::default()
-    }
-
-    pub fn save(&self) -> anyhow::Result<()> {
-        Ok(())
     }
 }
