@@ -136,6 +136,18 @@ impl RobsApp {
             chunk.swap(0, 2); // RGBA -> BGRA
         }
 
+        // Snapshot: capture the exact frame that is being recorded (scaled to
+        // output resolution, annotations baked in). `bgra_data` is BGRA; the
+        // PNG path wants RGBA, so swap channels on a clone.
+        if self.take_snapshot {
+            let mut snap = bgra_data.clone();
+            for chunk in snap.chunks_exact_mut(4) {
+                chunk.swap(0, 2); // BGRA -> RGBA
+            }
+            self.save_snapshot(&snap, out_w, out_h);
+            self.take_snapshot = false;
+        }
+
         // Send to FFmpeg writer thread
         if let Some(ref tx) = self.record.recording_frame_sender {
             match tx.send(bgra_data) {
@@ -262,11 +274,6 @@ impl RobsApp {
                     && self.record.recording_frame_sender.is_some()
                 {
                     self.send_frame_to_recording(&rgba_data, width, height);
-                }
-
-                if self.take_snapshot {
-                    self.save_snapshot(&rgba_data, width, height);
-                    self.take_snapshot = false;
                 }
             }
         }

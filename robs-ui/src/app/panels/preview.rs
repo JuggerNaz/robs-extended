@@ -410,12 +410,23 @@ impl RobsApp {
 
                         ui.separator();
 
-                        if ui.add_sized(
-                            [80.0, 28.0],
-                            egui::Button::new(
-                                egui::RichText::new("SNAPSHOT").color(egui::Color32::WHITE).strong(),
-                            ).fill(egui::Color32::from_rgb(40, 80, 160)),
-                        ).clicked() {
+                        // Snapshot is only meaningful during an active
+                        // recording; grey it out otherwise.
+                        let mut snapshot_clicked = false;
+                        ui.add_enabled_ui(self.record.recording, |ui| {
+                            snapshot_clicked = ui
+                                .add_sized(
+                                    [80.0, 28.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("SNAPSHOT")
+                                            .color(egui::Color32::WHITE)
+                                            .strong(),
+                                    )
+                                    .fill(egui::Color32::from_rgb(40, 80, 160)),
+                                )
+                                .clicked();
+                        });
+                        if snapshot_clicked {
                             self.take_snapshot = true;
                         }
 
@@ -441,6 +452,25 @@ impl RobsApp {
                         }
                     });
                 });
+
+                // Snapshot confirmation toast (fades after ~1.5s).
+                if let Some(t) = self.snapshot_flash {
+                    if t.elapsed() < std::time::Duration::from_millis(1500) {
+                        let toast_rect = egui::Rect::from_center_size(
+                            egui::pos2(rect.center().x, rect.min.y + 30.0),
+                            egui::vec2(190.0, 30.0),
+                        );
+                        ui.painter()
+                            .rect_filled(toast_rect, 4.0, egui::Color32::from_rgb(20, 90, 45));
+                        ui.painter().text(
+                            toast_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Snapshot saved",
+                            egui::FontId::proportional(13.0),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                }
             });
         }
     }

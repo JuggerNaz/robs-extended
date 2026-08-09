@@ -111,8 +111,12 @@ pub struct RobsApp {
     window_hwnds: std::collections::HashMap<robs_core::SceneItemId, isize>,
     // Active webcam capture sessions keyed by scene-item ID.
     webcam_captures: std::collections::HashMap<robs_core::SceneItemId, robs_sources::native_capture::WebcamCapture>,
-    // Flag to capture a snapshot on the next preview frame.
+    // Flag to capture a snapshot on the next recorded frame.
     take_snapshot: bool,
+    // Monotonic counter so rapid snapshots don't collide within the same second.
+    snapshot_seq: u64,
+    // When set, a "Snapshot saved" toast is rendered; cleared once it fades.
+    snapshot_flash: Option<std::time::Instant>,
     // Text overlays (persistent on-screen text baked into recordings).
     text_overlays: Vec<robs_core::TextOverlay>,
     overlay_text_input: String,
@@ -291,6 +295,8 @@ impl RobsApp {
             window_hwnds: std::collections::HashMap::new(),
             webcam_captures: std::collections::HashMap::new(),
             take_snapshot: false,
+            snapshot_seq: 0,
+            snapshot_flash: None,
             text_overlays: Vec::new(),
             overlay_text_input: String::new(),
         }
@@ -325,6 +331,13 @@ impl RobsApp {
             }
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
+
+        // Auto-clear the snapshot toast once it has faded.
+        if let Some(t) = self.snapshot_flash {
+            if t.elapsed() > std::time::Duration::from_millis(2000) {
+                self.snapshot_flash = None;
+            }
+        }
     }
 
     fn format_time(seconds: u64) -> String {
@@ -347,19 +360,40 @@ impl RobsApp {
     }
 
     fn save_snapshot(&mut self, rgba: &[u8], width: u32, height: u32) {
-        let dir = std::env::var("USERPROFILE")
-            .map(|p| format!("{}\\Videos\\Snapshots", p))
-            .unwrap_or_else(|_| "Snapshots".to_string());
+        // Link the snapshot to the active recording session: save into a
+        // `Snapshots` subfolder next to the recording file, named after it.
+        // Fall back to %USERPROFILE%\Videos\Snapshots\ if there is no recording.
+        let (dir, stem) = if self.record.recording && !self.record.last_recording_path.is_empty() {
+            let rec_path = std::path::Path::new(&self.record.last_recording_path);
+            let rec_stem = rec_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "ROBS_Recording".to_string());
+            let rec_dir = rec_path
+                .parent()
+                .map(|p| p.join("Snapshots"))
+                .unwrap_or_else(|| std::path::PathBuf::from("Snapshots"));
+            (rec_dir.to_string_lossy().into_owned(), rec_stem)
+        } else {
+            let fallback = std::env::var("USERPROFILE")
+                .map(|p| format!("{}\\Videos\\Snapshots", p))
+                .unwrap_or_else(|_| "Snapshots".to_string());
+            (fallback, "ROBS_Snapshot".to_string())
+        };
+
         let _ = std::fs::create_dir_all(&dir);
         let ts = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
-        let path = format!("{}\\ROBS_Snapshot_{}.png", dir, ts);
+        let seq = self.snapshot_seq;
+        self.snapshot_seq = self.snapshot_seq.wrapping_add(1);
+        let path = std::path::Path::new(&dir)
+            .join(format!("{}_snapshot_{}_{}.png", stem, ts, seq))
+            .to_string_lossy()
+            .into_owned();
 
         if let Some(img) = image::RgbaImage::from_raw(width, height, rgba.to_vec()) {
             if img.save(&path).is_ok() {
-                self.log_event(
-                    format!("Snapshot saved: {}", path),
-                    EventLogKind::Info,
-                );
+                self.snapshot_flash = Some(std::time::Instant::now());
+                self.log_event(format!("Snapshot saved: {}", path), EventLogKind::Info);
             }
         }
     }
