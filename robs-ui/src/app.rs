@@ -13,6 +13,7 @@
 //! within their own submodule stay private.
 
 mod annotations;
+mod anomaly;
 mod blackbox;
 mod capture;
 mod devices;
@@ -32,8 +33,8 @@ use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
 use robs_profiles::profile::ProfileManager;
 use state::{
-    AnnotationState, AudioChannel, AudioDeviceInfo, BlackboxState, EditingState, EventLogEntry,
-    EventLogKind, Panel, PreviewState, RecordState,
+    AnomalyState, AnnotationState, AudioChannel, AudioDeviceInfo, BlackboxState, EditingState,
+    EventLogEntry, EventLogKind, Panel, PreviewState, RecordState,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -123,6 +124,8 @@ pub struct RobsApp {
     overlay_text_input: String,
     // Always-on background safety recorder.
     blackbox: BlackboxState,
+    // User-toggled short-clip anomaly capture buffer.
+    anomaly: AnomalyState,
 }
 
 impl RobsApp {
@@ -320,6 +323,17 @@ impl RobsApp {
                     event_rx: Some(rx),
                 }
             },
+            anomaly: {
+                let (bus, rx) = robs_core::EventBus::new();
+                AnomalyState {
+                    enabled: false,
+                    settings: robs_profiles::settings::AnomalySettings::default(),
+                    engine: None,
+                    status: robs_core::event::AnomalyStatus::default(),
+                    event_tx: bus.tx(),
+                    event_rx: Some(rx),
+                }
+            },
         }
     }
 
@@ -367,6 +381,14 @@ impl RobsApp {
         if !blackbox_events.is_empty() {
             self.apply_blackbox_events(blackbox_events);
             // Status updates arrive ~1/s; keep the UI repainting so the chip/bar stay live.
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+
+        // Drain Anomaly engine events: refresh the status snapshot and log
+        // clip lifecycle events.
+        let anomaly_events = self.drain_anomaly_events();
+        if !anomaly_events.is_empty() {
+            self.apply_anomaly_events(anomaly_events);
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
     }

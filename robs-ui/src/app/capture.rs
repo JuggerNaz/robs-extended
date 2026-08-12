@@ -248,6 +248,10 @@ impl RobsApp {
                 // recorder BEFORE the preview path swaps it to RGBA (ffmpeg
                 // consumes BGRA natively). Non-blocking; no-op without an engine.
                 self.submit_blackbox_frame(&data, width, height);
+                // Anomaly tap: same raw BGRA frame, fed to the (user-toggled)
+                // rolling buffer for on-demand clip capture. Non-blocking; no-op
+                // without a running engine.
+                self.submit_anomaly_frame(&data, width, height);
 
                 // Convert BGRA -> RGBA (DXGI / GDI / webcam all return BGRA).
                 let mut rgba_data = data;

@@ -28,6 +28,7 @@ impl RobsApp {
                         "Streaming",
                         "Outputs",
                         "Blackbox",
+                        "Anomaly",
                     ]
                     .iter()
                     .enumerate()
@@ -53,6 +54,7 @@ impl RobsApp {
                                 4 => self.settings_streaming(ui),
                                 5 => self.settings_outputs(ui),
                                 6 => self.settings_blackbox(ui),
+                                7 => self.settings_anomaly(ui),
                                 _ => {}
                             }
                         });
@@ -525,6 +527,172 @@ impl RobsApp {
                 "Most changes take effect on the next capture start. Toggling \
                  Enable applies immediately. Container is fixed to mkv for \
                  crash-safety.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    fn settings_anomaly(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Anomaly Clip Capture");
+        ui.separator();
+        ui.label(
+            egui::RichText::new(
+                "A user-toggled rolling buffer. Start it, then hit Capture Clip \
+                 to export a short MP4 spanning the pre- and post-roll window \
+                 around the trigger. Independent of the main recording and the \
+                 Blackbox recorder.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+
+        egui::Grid::new("settings_anomaly").show(ui, |ui| {
+            ui.label("Encoder:");
+            egui::ComboBox::from_id_salt("anomaly_encoder")
+                .selected_text(&self.anomaly.settings.encoder)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.anomaly.settings.encoder,
+                        "libx264".to_string(),
+                        "libx264 (software)",
+                    );
+                    ui.selectable_value(
+                        &mut self.anomaly.settings.encoder,
+                        "h264_nvenc".to_string(),
+                        "h264_nvenc (NVIDIA hardware)",
+                    );
+                });
+            ui.end_row();
+
+            ui.label("Output directory:");
+            ui.horizontal(|ui| {
+                let display = if self.anomaly.settings.output_dir.is_empty() {
+                    "(recording path / Anomaly)".to_string()
+                } else {
+                    self.anomaly.settings.output_dir.clone()
+                };
+                ui.label(display);
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_directory(
+                            std::env::var("USERPROFILE")
+                                .unwrap_or_else(|_| "C:\\Users".to_string()),
+                        )
+                        .pick_folder()
+                    {
+                        self.anomaly.settings.output_dir =
+                            path.to_string_lossy().into_owned();
+                    }
+                }
+            });
+            ui.end_row();
+
+            ui.label("Pre-roll:");
+            ui.add(
+                egui::Slider::new(&mut self.anomaly.settings.pre_roll_secs, 1..=120).suffix(" s"),
+            );
+            ui.end_row();
+
+            ui.label("Post-roll:");
+            ui.add(
+                egui::Slider::new(&mut self.anomaly.settings.post_roll_secs, 1..=120).suffix(" s"),
+            );
+            ui.end_row();
+
+            ui.label("Segment length:");
+            ui.add(
+                egui::Slider::new(&mut self.anomaly.settings.segment_duration_secs, 1..=10)
+                    .suffix(" s"),
+            );
+            ui.end_row();
+
+            ui.label("Max buffer size:");
+            ui.add(
+                egui::Slider::new(&mut self.anomaly.settings.max_buffer_mb, 64..=4096)
+                    .suffix(" MiB"),
+            );
+            ui.end_row();
+
+            ui.label("CRF (x264):");
+            ui.add(egui::Slider::new(&mut self.anomaly.settings.crf, 0..=51));
+            ui.end_row();
+
+            ui.label("Bitrate (nvenc):");
+            ui.add(
+                egui::Slider::new(&mut self.anomaly.settings.video_bitrate_kbps, 500..=50000)
+                    .suffix(" kbps"),
+            );
+            ui.end_row();
+
+            ui.label("Clip prefix:");
+            ui.text_edit_singleline(&mut self.anomaly.settings.clip_prefix);
+            ui.end_row();
+
+            ui.label("Clip suffix:");
+            ui.text_edit_singleline(&mut self.anomaly.settings.clip_suffix);
+            ui.end_row();
+
+            ui.label("Capture-clip hotkey:");
+            ui.text_edit_singleline(&mut self.anomaly.settings.capture_clip_hotkey);
+            ui.end_row();
+        });
+
+        ui.separator();
+        let running = self
+            .anomaly
+            .engine
+            .as_ref()
+            .map(|e| e.is_running())
+            .unwrap_or(false);
+        ui.horizontal(|ui| {
+            if ui
+                .button(if running { "Stop buffer" } else { "Start buffer" })
+                .clicked()
+            {
+                if running {
+                    self.stop_anomaly();
+                } else {
+                    self.start_anomaly();
+                }
+            }
+            let can_capture =
+                running && self.anomaly.status.buffering && self.anomaly.status.clips_busy == 0;
+            if ui
+                .add_enabled(can_capture, egui::Button::new("Capture clip now"))
+                .clicked()
+            {
+                self.request_anomaly_clip();
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Status:").strong());
+            let st = &self.anomaly.status;
+            if !running {
+                ui.label("stopped");
+            } else if !st.buffering {
+                ui.label("running (waiting for frames)");
+            } else {
+                ui.label(format!("buffering — {}s held", st.buffer_secs_filled));
+            }
+        });
+
+        if let Some(e) = &self.anomaly.status.last_error {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!("Last error: {e}"))
+                    .color(egui::Color32::from_rgb(200, 90, 90)),
+            );
+        }
+
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Exported clips use the MP4 container (stream-copy, no re-encode). \
+                 v1 exports one clip at a time.",
             )
             .small()
             .weak(),

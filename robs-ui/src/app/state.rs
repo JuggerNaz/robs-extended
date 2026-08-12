@@ -131,6 +131,20 @@ pub(crate) struct BlackboxState {
     pub(crate) event_rx: Option<robs_core::event::EventRx>,
 }
 
+/// Short Clip Anomaly Capture engine state.
+///
+/// User-toggled rolling buffer. Unlike Blackbox, the engine is started/stopped
+/// explicitly via the UI (Start/Stop Buffer), not auto-synced to capture state.
+pub(crate) struct AnomalyState {
+    /// Master on/off (toggled live by the Start/Stop button).
+    pub(crate) enabled: bool,
+    pub(crate) settings: robs_profiles::settings::AnomalySettings,
+    pub(crate) engine: Option<robs_outputs::AnomalyCaptureEngine>,
+    pub(crate) status: robs_core::event::AnomalyStatus,
+    pub(crate) event_tx: robs_core::event::EventTx,
+    pub(crate) event_rx: Option<robs_core::event::EventRx>,
+}
+
 /// Source-properties modal editing state.
 pub(crate) struct EditingState {
     pub(crate) show_source_properties: bool,

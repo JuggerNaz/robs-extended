@@ -15,6 +15,7 @@ pub enum RobsEvent {
     Profile(ProfileEvent),
     Chat(ChatEvent),
     Blackbox(BlackboxEvent),
+    Anomaly(AnomalyEvent),
     Error(ErrorEvent),
     Log(LogEvent),
 }
@@ -75,6 +76,70 @@ pub struct BlackboxStorageStatus {
     pub free_percent: f32,
     pub low_warning: bool,
     pub critical: bool,
+}
+
+/// Events emitted by the Short Clip Anomaly Capture engine.
+///
+/// These flow through the normal [`EventBus`] so the UI (and any future
+/// programmatic trigger source) can react to buffer readiness and clip-export
+/// results without coupling to the engine internals. The engine is
+/// user-toggled (explicit Start/Stop), unlike the always-on Blackbox recorder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AnomalyEvent {
+    /// The buffer engine is now running and filling its rolling ring.
+    Started,
+    /// The buffer engine was stopped (user toggle / shutdown).
+    Stopped,
+    /// The ring has accumulated enough finalized segments to cover the
+    /// configured pre-roll window — a clip saved now will include full pre-roll.
+    BufferReady { secs_filled: u64 },
+    /// A clip was requested (manual button / hotkey / programmatic `save`).
+    ClipRequested { clip_id: String },
+    /// A clip finished exporting to disk.
+    ClipReady { clip_id: String, path: String },
+    /// A clip export failed.
+    ClipFailed { clip_id: String, message: String },
+    /// A clip was requested while another export was already in flight.
+    ClipBusy { clip_id: String },
+    /// A non-fatal engine error (ffmpeg spawn failure, disk error, ...).
+    Error { message: String },
+    /// Periodic health snapshot for UI display.
+    StatusUpdated { status: AnomalyStatus },
+}
+
+/// A snapshot of the Anomaly Capture engine's runtime health. Published
+/// periodically (and on state changes) via [`AnomalyEvent::StatusUpdated`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnomalyStatus {
+    /// Engine is running (worker thread alive).
+    pub running: bool,
+    /// Engine has received at least one frame since start.
+    pub buffering: bool,
+    /// Seconds of footage currently held in the rolling ring (0 until the first
+    /// segment finalizes).
+    pub buffer_secs_filled: u64,
+    /// Total clips successfully exported since the engine started.
+    pub clips_exported: u64,
+    /// Nonzero while a clip export is in flight (a concurrent `save` is rejected).
+    pub clips_busy: u64,
+    /// Frames dropped due to a full channel (never blocks the UI).
+    pub dropped_frames: u64,
+    /// Path of the most recently exported clip, if any.
+    pub last_clip_path: Option<String>,
+    /// Last non-transient error message, if any.
+    pub last_error: Option<String>,
+    /// Storage health for the target disk.
+    pub storage: AnomalyStorageStatus,
+}
+
+/// Disk-space snapshot for the Anomaly output directory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnomalyStorageStatus {
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+    /// Percentage of the disk that is free (0.0–100.0). 0.0 when total is unknown.
+    pub free_percent: f32,
+    pub low_warning: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
