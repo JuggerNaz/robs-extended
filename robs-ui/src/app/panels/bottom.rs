@@ -39,6 +39,8 @@ impl RobsApp {
                     }
                     // Blackbox safety-recorder health chip (no-op when disabled/idle).
                     self.blackbox_status_chip(ui);
+                    // Anomaly clip-buffer controls (Start/Stop + Capture Clip + chip).
+                    self.anomaly_controls(ui);
                 });
             });
             ui.add_space(2.0);

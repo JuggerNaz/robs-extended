@@ -64,6 +64,75 @@ impl BlackboxSettings {
     }
 }
 
+/// Settings for the Short Clip Anomaly Capture engine.
+///
+/// An explicitly user-toggled rolling buffer that, on a manual or programmatic
+/// trigger, exports a short MP4 clip spanning a configurable pre-roll +
+/// post-roll window. See `robs-outputs::anomaly::AnomalyConfig` for the runtime
+/// struct these are projected into.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnomalySettings {
+    /// Master switch. Unlike the always-on Blackbox recorder, the buffer must
+    /// be explicitly started by the user (Start/Stop).
+    pub enabled: bool,
+    /// Output directory for exported clips. Empty => an `Anomaly/` subdir under
+    /// the configured recording path (resolved by the UI).
+    pub output_dir: String,
+    /// Footage captured *before* the trigger to include in the exported clip.
+    pub pre_roll_secs: u32,
+    /// Footage captured *after* the trigger to include in the exported clip.
+    pub post_roll_secs: u32,
+    /// Hard cap on the on-disk scratch ring size in MiB.
+    pub max_buffer_mb: u32,
+    /// Duration of each rolling scratch segment. Shorter = finer pre-roll
+    /// accuracy + faster concat; longer = fewer ffmpeg spawns.
+    pub segment_duration_secs: u32,
+    /// ffmpeg encoder id: `"libx264"` (software) or `"h264_nvenc"` (hardware).
+    pub encoder: String,
+    /// CRF used by the software (x264) path.
+    pub crf: u8,
+    /// Bitrate in kbps used by the nvenc CBR path.
+    pub video_bitrate_kbps: u32,
+    /// Output (scaled) width. 0 = use the native capture resolution.
+    pub output_width: u32,
+    /// Output (scaled) height. 0 = use the native capture resolution.
+    pub output_height: u32,
+    /// Prefix prepended to exported clip filenames.
+    pub clip_prefix: String,
+    /// Suffix appended to exported clip filenames (before the extension).
+    pub clip_suffix: String,
+    /// Hotkey binding string for the manual Capture Clip action (free-form;
+    /// matched on raw key text, e.g. "Ctrl+Shift+A"). Empty = unbound.
+    pub capture_clip_hotkey: String,
+}
+
+impl Default for AnomalySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output_dir: String::new(),
+            pre_roll_secs: 15,
+            post_roll_secs: 15,
+            max_buffer_mb: 512,
+            segment_duration_secs: 2,
+            encoder: "libx264".into(),
+            crf: 23,
+            video_bitrate_kbps: 2500,
+            output_width: 0,
+            output_height: 0,
+            clip_prefix: "Anomaly".into(),
+            clip_suffix: String::new(),
+            capture_clip_hotkey: String::new(),
+        }
+    }
+}
+
+impl AnomalySettings {
+    pub fn load_or_default() -> Self {
+        Self::default()
+    }
+}
+
 impl AppSettings {
     pub fn load_or_default() -> Self {
         Self::default()
@@ -82,6 +151,7 @@ pub struct AppSettings {
     pub hotkeys: Vec<HotkeyBinding>,
     pub ui: UiSettings,
     pub blackbox: BlackboxSettings,
+    pub anomaly: AnomalySettings,
 }
 
 impl Default for AppSettings {
@@ -93,6 +163,7 @@ impl Default for AppSettings {
             hotkeys: Vec::new(),
             ui: UiSettings::default(),
             blackbox: BlackboxSettings::default(),
+            anomaly: AnomalySettings::default(),
         }
     }
 }
