@@ -41,6 +41,10 @@ impl RobsApp {
                                                             self.event_log.clear();
                                                             ui.close_menu();
                                                         }
+                                                        if ui.button("Export PDF...").clicked() {
+                                                            ui.close_menu();
+                                                            self.export_event_log_pdf();
+                                                        }
                                                     },
                                                 );
                                             },
@@ -275,9 +279,72 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
                             });
                         }
 
-                        // --- Event Log section moved to top ---
-                    });
+                    // --- Event Log section moved to top ---
                 });
+            });
+        }
+    }
+
+    /// Export the current event log as a paginated PDF report.
+    ///
+    /// Shows a native save dialog (rfd, same as the settings folder pickers),
+    /// builds a chronological `Report` — the in-app log shows newest-first, but
+    /// a report reads oldest-first — and writes it with the dependency-free
+    /// PDF writer in `robs_outputs::report`. The outcome is logged back into
+    /// the event log itself.
+    fn export_event_log_pdf(&mut self) {
+        if self.event_log.is_empty() {
+            self.log_event("Event log is empty - nothing to export", EventLogKind::Info);
+            return;
+        }
+
+        let default_name = format!(
+            "robs_event_log_{}.pdf",
+            chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
+        );
+        let start_dir =
+            std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users".to_string());
+        let Some(path) = rfd::FileDialog::new()
+            .set_directory(start_dir)
+            .set_file_name(default_name)
+            .add_filter("PDF report", &["pdf"])
+            .save_file()
+        else {
+            return; // user cancelled the dialog
+        };
+
+        let mut report = robs_outputs::Report::new("ROBS Event Log Report", "Session event log export");
+        report.push_meta(
+            "Generated",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        );
+        report.push_meta("Entries", self.event_log.len().to_string());
+        report.push_meta(
+            "Application",
+            format!("ROBS {}", robs_core::ROBS_VERSION),
+        );
+        for entry in &self.event_log {
+            let kind = match entry.kind {
+                EventLogKind::Stream => "Stream",
+                EventLogKind::Record => "Record",
+                EventLogKind::Annotation => "Annotation",
+                EventLogKind::Overlay => "Overlay",
+                EventLogKind::Info => "Info",
+            };
+            report.push_line(format!(
+                "{}  [{:<10}]  {}",
+                entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                kind,
+                entry.message
+            ));
+        }
+
+        match robs_outputs::report::write_pdf(&report, &path) {
+            Ok(()) => self.log_event(
+                format!("Event log exported to {}", path.display()),
+                EventLogKind::Info,
+            ),
+            Err(e) => self.log_event(format!("PDF export failed: {e}"), EventLogKind::Info),
         }
     }
 }
