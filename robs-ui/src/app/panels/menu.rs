@@ -1,5 +1,4 @@
-//! Top menu bar (File / Edit / View / Profile / Help). Extracted verbatim
-//! from `app.rs`.
+//! Top menu bar (File / Edit / View / Help). Extracted verbatim from `app.rs`.
 
 use super::super::RobsApp;
 use eframe::egui;
@@ -44,15 +43,6 @@ impl RobsApp {
                     ui.checkbox(&mut self.show_event_log, "Event Log");
                     ui.separator();
                     ui.checkbox(&mut self.annotation.show_annotations, "Annotations Toolbar");
-                });
-                ui.menu_button("Profile", |ui| {
-                    let profiles = self.profile_manager.read().list();
-                    for (id, name) in profiles {
-                        if ui.button(&name).clicked() {
-                            self.profile_manager.write().set_current(id).ok();
-                            ui.close_menu();
-                        }
-                    }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About ROBS").clicked() {
