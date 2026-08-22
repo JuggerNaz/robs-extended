@@ -314,11 +314,19 @@ impl RobsApp {
                             }
                         }
 
+                        // STOP halts whichever encoder is live (recording
+                        // and/or the stream; they run as separate FFmpeg
+                        // processes and are stopped independently).
                         let stop_color = egui::Color32::from_rgb(180, 0, 0);
                         if Self::quick_action_button(ui, "\u{25A0}", "STOP", stop_color, true)
-                            && self.record.recording
+                            && (self.record.recording || self.streaming)
                         {
-                            self.stop_recording();
+                            if self.record.recording {
+                                self.stop_recording();
+                            }
+                            if self.streaming {
+                                self.stop_streaming();
+                            }
                         }
 
                         ui.separator();
@@ -332,10 +340,9 @@ impl RobsApp {
                         };
                         if Self::quick_action_button(ui, str_icon, str_label, str_color, true) {
                             if !self.streaming {
-                                self.streaming = true;
-                                self.streaming_time = 0;
-                                self.streaming_paused = false;
-                                self.log_event("Streaming started", EventLogKind::Stream);
+                                // Spawns the RTMP FFmpeg; on a missing
+                                // server/key it logs guidance and stays off.
+                                self.start_streaming();
                             } else if self.streaming_paused {
                                 self.streaming_paused = false;
                                 self.log_event("Streaming resumed", EventLogKind::Stream);

@@ -83,6 +83,23 @@ pub(crate) struct RecordState {
     pub(crate) frame_count: u64,
 }
 
+/// RTMP streaming-session runtime state.
+///
+/// Mirrors the process machinery of `RecordState`: FFmpeg is spawned by
+/// `start_streaming()` (`stream.rs`), frames produced by the UI tick are
+/// drained by a dedicated writer thread into FFmpeg's stdin, and shutdown
+/// follows the same stop-flag → drop-sender → join-thread → wait-child order.
+/// The flat `streaming` / `streaming_paused` / `streaming_time` fields on
+/// `RobsApp` remain the UI-level view of this state.
+#[allow(dead_code)]
+pub(crate) struct StreamState {
+    pub(crate) ffmpeg_handle: Option<std::process::Child>,
+    pub(crate) writer_thread: Option<std::thread::JoinHandle<()>>,
+    pub(crate) stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) frame_sender: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    pub(crate) frame_count: u64,
+}
+
 /// Live preview-capture state: per-source frame buffers, GPU textures, and the
 /// capture-rate throttle.
 #[allow(dead_code)]
