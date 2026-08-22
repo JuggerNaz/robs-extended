@@ -41,6 +41,19 @@ impl RobsApp {
         self.anomaly.enabled = false;
     }
 
+    /// Persist the anomaly settings to the config-dir `settings.json`.
+    /// Called when the Settings window closes (the app's commit gesture —
+    /// eframe runs without the `persistence` feature, so there is no exit
+    /// hook). Silent on success; failures surface in the event log.
+    pub(crate) fn save_anomaly_settings(&mut self) {
+        if let Err(e) = self.anomaly.settings.save() {
+            self.log_event(
+                format!("Failed to save anomaly settings: {e}"),
+                EventLogKind::Info,
+            );
+        }
+    }
+
     /// Project the user's anomaly settings (+ active output dims/fps) into the
     /// runtime config. An empty `output_dir` resolves to an `Anomaly/` subfolder
     /// of the recording path (or `%USERPROFILE%\Videos` when none is set).

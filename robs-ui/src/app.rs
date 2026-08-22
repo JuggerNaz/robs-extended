@@ -327,7 +327,9 @@ impl RobsApp {
                 let (bus, rx) = robs_core::EventBus::new();
                 AnomalyState {
                     enabled: false,
-                    settings: robs_profiles::settings::AnomalySettings::default(),
+                    // Persisted settings (config dir `settings.json`); defaults
+                    // on first run or an unreadable file.
+                    settings: robs_profiles::settings::AnomalySettings::load_or_default(),
                     engine: None,
                     status: robs_core::event::AnomalyStatus::default(),
                     event_tx: bus.tx(),
