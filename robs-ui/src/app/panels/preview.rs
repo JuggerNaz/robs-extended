@@ -302,36 +302,7 @@ impl RobsApp {
                         } else {
                             ("\u{23F8}", "PAUSE", egui::Color32::from_rgb(200, 150, 0))
                         };
-                        let rec_response = ui.allocate_exact_size(
-                            egui::vec2(56.0, 46.0),
-                            egui::Sense::click(),
-                        );
-                        let (rec_rect, _) = rec_response;
-                        let rec_resp = &rec_response.1;
-                        let rec_fill = if rec_resp.hovered() {
-                            rec_color.linear_multiply(1.2)
-                        } else {
-                            rec_color
-                        };
-                        ui.painter().rect_filled(rec_rect, 4.0, rec_fill);
-                        ui.painter().text(
-                            egui::pos2(rec_rect.center().x, rec_rect.min.y + 16.0),
-                            egui::Align2::CENTER_CENTER,
-                            rec_icon,
-                            egui::FontId::proportional(22.0),
-                            egui::Color32::WHITE,
-                        );
-                        ui.painter().text(
-                            egui::pos2(rec_rect.center().x, rec_rect.max.y - 9.0),
-                            egui::Align2::CENTER_CENTER,
-                            rec_label,
-                            egui::FontId::proportional(9.0),
-                            egui::Color32::WHITE,
-                        );
-                        if rec_resp.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        if rec_resp.clicked() {
+                        if Self::quick_action_button(ui, rec_icon, rec_label, rec_color, true) {
                             if !self.record.recording {
                                 self.start_recording();
                             } else if self.record.recording_paused {
@@ -343,57 +314,23 @@ impl RobsApp {
                             }
                         }
 
-                        let stop_response = ui.allocate_exact_size(
-                            egui::vec2(56.0, 46.0),
-                            egui::Sense::click(),
-                        );
-                        let (stop_rect, _) = stop_response;
-                        let stop_resp = &stop_response.1;
                         let stop_color = egui::Color32::from_rgb(180, 0, 0);
-                        let stop_fill = if stop_resp.hovered() {
-                            stop_color.linear_multiply(1.2)
-                        } else {
-                            stop_color
-                        };
-                        ui.painter().rect_filled(stop_rect, 4.0, stop_fill);
-                        ui.painter().text(
-                            egui::pos2(stop_rect.center().x, stop_rect.min.y + 16.0),
-                            egui::Align2::CENTER_CENTER,
-                            "\u{25A0}",
-                            egui::FontId::proportional(22.0),
-                            egui::Color32::WHITE,
-                        );
-                        ui.painter().text(
-                            egui::pos2(stop_rect.center().x, stop_rect.max.y - 9.0),
-                            egui::Align2::CENTER_CENTER,
-                            "STOP",
-                            egui::FontId::proportional(9.0),
-                            egui::Color32::WHITE,
-                        );
-                        if stop_resp.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        if stop_resp.clicked() {
-                            if self.record.recording {
-                                self.stop_recording();
-                            }
+                        if Self::quick_action_button(ui, "\u{25A0}", "STOP", stop_color, true)
+                            && self.record.recording
+                        {
+                            self.stop_recording();
                         }
 
                         ui.separator();
 
-                        let (str_label, str_color) = if !self.streaming {
-                            ("STREAM", egui::Color32::from_rgb(0, 110, 180))
+                        let (str_icon, str_label, str_color) = if !self.streaming {
+                            ("\u{1F4E1}", "STREAM", egui::Color32::from_rgb(0, 110, 180))
                         } else if self.streaming_paused {
-                            ("RESUME", egui::Color32::from_rgb(0, 110, 180))
+                            ("\u{25B6}", "RESUME", egui::Color32::from_rgb(0, 110, 180))
                         } else {
-                            ("PAUSE", egui::Color32::from_rgb(200, 150, 0))
+                            ("\u{23F8}", "PAUSE", egui::Color32::from_rgb(200, 150, 0))
                         };
-                        if ui.add_sized(
-                            [72.0, 28.0],
-                            egui::Button::new(
-                                egui::RichText::new(str_label).color(egui::Color32::WHITE).strong(),
-                            ).fill(str_color),
-                        ).clicked() {
+                        if Self::quick_action_button(ui, str_icon, str_label, str_color, true) {
                             if !self.streaming {
                                 self.streaming = true;
                                 self.streaming_time = 0;
@@ -411,43 +348,37 @@ impl RobsApp {
                         ui.separator();
 
                         // Snapshot is only meaningful during an active
-                        // recording; grey it out otherwise.
-                        let mut snapshot_clicked = false;
-                        ui.add_enabled_ui(self.record.recording, |ui| {
-                            snapshot_clicked = ui
-                                .add_sized(
-                                    [80.0, 28.0],
-                                    egui::Button::new(
-                                        egui::RichText::new("SNAPSHOT")
-                                            .color(egui::Color32::WHITE)
-                                            .strong(),
-                                    )
-                                    .fill(egui::Color32::from_rgb(40, 80, 160)),
-                                )
-                                .clicked();
-                        });
-                        if snapshot_clicked {
+                        // recording; the shared button greys out otherwise.
+                        if Self::quick_action_button(
+                            ui,
+                            "\u{1F4F7}",
+                            "SNAPSHOT",
+                            egui::Color32::from_rgb(40, 80, 160),
+                            self.record.recording,
+                        ) {
                             self.take_snapshot = true;
                         }
 
-                        if ui.add_sized(
-                            [80.0, 28.0],
-                            egui::Button::new(
-                                egui::RichText::new("MARK").color(egui::Color32::WHITE).strong(),
-                            ).fill(egui::Color32::from_rgb(180, 110, 0)),
-                        ).clicked() {
+                        if Self::quick_action_button(
+                            ui,
+                            "\u{2691}",
+                            "MARK",
+                            egui::Color32::from_rgb(180, 110, 0),
+                            true,
+                        ) {
                             self.log_event(
                                 format!("Marker #{} added", self.event_log.len()),
                                 EventLogKind::Info,
                             );
                         }
 
-                        if ui.add_sized(
-                            [90.0, 28.0],
-                            egui::Button::new(
-                                egui::RichText::new("BOOKMARK").color(egui::Color32::WHITE).strong(),
-                            ).fill(egui::Color32::from_rgb(120, 80, 160)),
-                        ).clicked() {
+                        if Self::quick_action_button(
+                            ui,
+                            "\u{1F516}",
+                            "BOOKMARK",
+                            egui::Color32::from_rgb(120, 80, 160),
+                            true,
+                        ) {
                             self.log_event("Bookmark added", EventLogKind::Info);
                         }
                     });
@@ -473,5 +404,55 @@ impl RobsApp {
                 }
             });
         }
+    }
+
+    /// Paint one Quick Actions bar button: a fixed 56x46 rounded rect with a
+    /// 22pt glyph above a 9pt label — the exact construction the original
+    /// START/STOP buttons used, shared by every control in the bar so they
+    /// all have identical dimensions. Returns `true` when clicked. With
+    /// `enabled == false` the button is greyed out and inert (SNAPSHOT
+    /// outside a recording) but keeps the same footprint.
+    fn quick_action_button(
+        ui: &mut egui::Ui,
+        icon: &str,
+        label: &str,
+        color: egui::Color32,
+        enabled: bool,
+    ) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(56.0, 46.0), egui::Sense::click());
+        let (fill, text) = if enabled {
+            (
+                if resp.hovered() {
+                    color.linear_multiply(1.2)
+                } else {
+                    color
+                },
+                egui::Color32::WHITE,
+            )
+        } else {
+            (
+                egui::Color32::from_rgb(60, 60, 60),
+                egui::Color32::from_rgb(150, 150, 150),
+            )
+        };
+        ui.painter().rect_filled(rect, 4.0, fill);
+        ui.painter().text(
+            egui::pos2(rect.center().x, rect.min.y + 16.0),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            egui::FontId::proportional(22.0),
+            text,
+        );
+        ui.painter().text(
+            egui::pos2(rect.center().x, rect.max.y - 9.0),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(9.0),
+            text,
+        );
+        if enabled && resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        enabled && resp.clicked()
     }
 }
