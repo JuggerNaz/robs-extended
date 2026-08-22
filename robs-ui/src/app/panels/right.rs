@@ -115,10 +115,7 @@ let (s_icon, _s_label, s_color) = if !self.streaming {
                                         egui::RichText::new(format!("{} Stream", s_icon)).color(s_color).strong(),
                                     )).clicked() {
                                         if !self.streaming {
-                                            self.streaming = true;
-                                            self.streaming_time = 0;
-                                            self.streaming_paused = false;
-                                            self.log_event("Streaming started", EventLogKind::Stream);
+                                            self.start_streaming();
                                         } else if self.streaming_paused {
                                             self.streaming_paused = false;
                                             self.log_event("Streaming resumed", EventLogKind::Stream);
@@ -131,9 +128,7 @@ let (s_icon, _s_label, s_color) = if !self.streaming {
                                         self.streaming,
                                         egui::Button::new(egui::RichText::new("\u{23F9} Stop Stream").color(egui::Color32::RED)),
                                     ).clicked() {
-                                        self.streaming = false;
-                                        self.streaming_paused = false;
-                                        self.log_event("Streaming stopped", EventLogKind::Stream);
+                                        self.stop_streaming();
                                     }
 
                                     ui.separator();

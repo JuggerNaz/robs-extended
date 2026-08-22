@@ -247,13 +247,31 @@ impl RobsApp {
         ui.separator();
         egui::Grid::new("settings_streaming").show(ui, |ui| {
             ui.label("Service:");
-            let _ = ui.button("Twitch");
+            // Picking a known service swaps in its ingest server; Custom keeps
+            // the current server for hand-editing.
+            let mut service = self.stream_service.clone();
+            egui::ComboBox::from_id_salt("stream_service")
+                .selected_text(&service)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut service, "YouTube".to_string(), "YouTube");
+                    ui.selectable_value(&mut service, "Twitch".to_string(), "Twitch");
+                    ui.selectable_value(&mut service, "Custom".to_string(), "Custom...");
+                });
+            if service != self.stream_service {
+                match service.as_str() {
+                    "YouTube" => self.stream_server = "rtmp://a.rtmp.youtube.com/live2".into(),
+                    "Twitch" => self.stream_server = "rtmp://live.twitch.tv/app".into(),
+                    _ => {}
+                }
+                self.stream_service = service;
+            }
             ui.end_row();
             ui.label("Server:");
             ui.text_edit_singleline(&mut self.stream_server);
             ui.end_row();
             ui.label("Stream Key:");
-            ui.text_edit_singleline(&mut self.stream_key);
+            // Masked: the key is a credential for the channel's ingest.
+            ui.add(egui::TextEdit::singleline(&mut self.stream_key).password(true));
             ui.end_row();
             ui.label("Video Encoder:");
             egui::ComboBox::from_id_salt("video_encoder")
@@ -286,6 +304,15 @@ impl RobsApp {
             let _ = ui.button("faster");
             ui.end_row();
         });
+
+        ui.separator();
+        ui.label(
+            egui::RichText::new(
+                "YouTube key: YouTube Studio \u{2192} Go live \u{2192} Stream key. Twitch key: Settings \u{2192} Stream \u{2192} Primary Stream key.",
+            )
+            .small()
+            .weak(),
+        );
 
         ui.separator();
         ui.horizontal(|ui| {

@@ -21,6 +21,7 @@ mod panels;
 mod record;
 mod settings;
 mod state;
+mod stream;
 
 use crate::dxgi_capture::DxgiCaptureManager;
 use devices::get_audio_devices;
@@ -34,7 +35,7 @@ use robs_encoding::detect_encoders;
 use robs_profiles::profile::ProfileManager;
 use state::{
     AnomalyState, AnnotationState, AudioChannel, AudioDeviceInfo, BlackboxState, EditingState,
-    EventLogEntry, EventLogKind, Panel, PreviewState, RecordState,
+    EventLogEntry, EventLogKind, Panel, PreviewState, RecordState, StreamState,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -78,6 +79,7 @@ pub struct RobsApp {
     output_width: u32,
     output_height: u32,
     fps_setting: f32,
+    stream_service: String,
     stream_server: String,
     stream_key: String,
     stream_bitrate: u32,
@@ -106,6 +108,7 @@ pub struct RobsApp {
     dxgi_manager: Option<DxgiCaptureManager>,
     // Cohesive state clusters (definitions in `state.rs`).
     record: RecordState,
+    stream: StreamState,
     preview: PreviewState,
     annotation: AnnotationState,
     editing: EditingState,
@@ -225,7 +228,8 @@ impl RobsApp {
             output_width: 1280,
             output_height: 720,
             fps_setting: 30.0,
-            stream_server: "rtmp://live.twitch.tv/app".into(),
+            stream_service: "YouTube".into(),
+            stream_server: "rtmp://a.rtmp.youtube.com/live2".into(),
             stream_key: String::new(),
             stream_bitrate: 6000,
             keyframe_interval: 2,
@@ -261,6 +265,13 @@ impl RobsApp {
                 recording_frame_sender: None,
                 recording_ffmpeg_stdin: None,
                 last_frame_time: None,
+                frame_count: 0,
+            },
+            stream: StreamState {
+                ffmpeg_handle: None,
+                writer_thread: None,
+                stop_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                frame_sender: None,
                 frame_count: 0,
             },
             preview: PreviewState {
@@ -367,6 +378,21 @@ impl RobsApp {
                 self.record.recording_time += 1;
             }
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+
+        // If the streaming FFmpeg died on its own (bad key, network drop,
+        // ingest rejection), surface it instead of ticking a ghost LIVE timer.
+        if self.streaming {
+            let ffmpeg_alive = self
+                .stream
+                .ffmpeg_handle
+                .as_mut()
+                .map(|child| child.try_wait().ok().flatten().is_none())
+                .unwrap_or(false);
+            if !ffmpeg_alive {
+                self.stop_streaming();
+                self.log_event("Stream ended unexpectedly", EventLogKind::Stream);
+            }
         }
 
         // Auto-clear the snapshot toast once it has faded.

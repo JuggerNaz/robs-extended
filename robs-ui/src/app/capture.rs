@@ -69,16 +69,22 @@ impl RobsApp {
             .map(|frame| (frame.data, frame.width, frame.height))
     }
 
-    /// Send an already-captured frame to the recording pipeline
-    /// This reuses the preview capture frame - no double capture needed
-    fn send_frame_to_recording(&mut self, rgba_data: &[u8], width: u32, height: u32) {
+    /// Compose the shared output frame for whichever encoders are active
+    /// (recording and/or streaming). This reuses the preview capture frame -
+    /// no double capture needed - and exists so both consumers get the SAME
+    /// composed frame instead of scaling/annotating twice per tick.
+    ///
+    /// Rate-limits to the target FPS, scales to the output resolution, bakes
+    /// annotations/overlays, handles the snapshot hook, and converts RGBA→BGRA
+    /// for FFmpeg. Returns `None` when the rate limiter skipped this frame.
+    fn compose_output_frame(&mut self, rgba_data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
         // Rate limit to target FPS
         let target_frame_interval = std::time::Duration::from_secs_f32(1.0 / self.fps_setting);
 
         let now = std::time::Instant::now();
         if let Some(last_time) = self.record.last_frame_time {
             if now.duration_since(last_time) < target_frame_interval {
-                return; // Skip this frame - not enough time elapsed
+                return None; // Skip this frame - not enough time elapsed
             }
         }
         self.record.last_frame_time = Some(now);
@@ -136,7 +142,7 @@ impl RobsApp {
             chunk.swap(0, 2); // RGBA -> BGRA
         }
 
-        // Snapshot: capture the exact frame that is being recorded (scaled to
+        // Snapshot: capture the exact frame that is being encoded (scaled to
         // output resolution, annotations baked in). `bgra_data` is BGRA; the
         // PNG path wants RGBA, so swap channels on a clone.
         if self.take_snapshot {
@@ -148,29 +154,7 @@ impl RobsApp {
             self.take_snapshot = false;
         }
 
-        // Send to FFmpeg writer thread
-        if let Some(ref tx) = self.record.recording_frame_sender {
-            match tx.send(bgra_data) {
-                Ok(_) => {
-                    self.record.frame_count += 1;
-                    if self.record.frame_count % 30 == 0 {
-                        eprintln!(
-                            "[DXGI-Record] Sent {} frames to FFmpeg ({}x{})",
-                            self.record.frame_count,
-                            out_w,
-                            out_h
-                        );
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[DXGI-Record] Channel send failed: {}, stopping recording",
-                        e
-                    );
-                    self.stop_recording();
-                }
-            }
-        }
+        Some(bgra_data)
     }
 
     pub(crate) fn process_preview_frames(&mut self, ctx: &egui::Context) {
@@ -276,13 +260,53 @@ impl RobsApp {
                     self.preview.preview_textures.insert(texture_key, texture);
                 }
 
-                // RECORDING: reuse the captured frame (no double capture -
-                // recording taps into the same frame preview uses).
-                if self.record.recording
+                // RECORDING / STREAMING: reuse the captured frame (no double
+                // capture - both encoders tap into the same frame preview
+                // uses). Compose once, then hand a copy to each active
+                // encoder so running both at once does not double the
+                // scale/annotation work per tick.
+                let recording_active = self.record.recording
                     && !self.record.recording_paused
-                    && self.record.recording_frame_sender.is_some()
-                {
-                    self.send_frame_to_recording(&rgba_data, width, height);
+                    && self.record.recording_frame_sender.is_some();
+                let streaming_active =
+                    self.streaming && !self.streaming_paused && self.stream.frame_sender.is_some();
+                if recording_active || streaming_active {
+                    if let Some(bgra) = self.compose_output_frame(&rgba_data, width, height) {
+                        if recording_active {
+                            if let Some(tx) = &self.record.recording_frame_sender {
+                                match tx.send(bgra.clone()) {
+                                    Ok(_) => {
+                                        self.record.frame_count += 1;
+                                        if self.record.frame_count.is_multiple_of(30) {
+                                            eprintln!(
+                                                "[DXGI-Record] Sent {} frames to FFmpeg",
+                                                self.record.frame_count
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[DXGI-Record] Channel send failed: {e}, stopping recording"
+                                        );
+                                        self.stop_recording();
+                                    }
+                                }
+                            }
+                        }
+                        if streaming_active {
+                            if let Some(tx) = &self.stream.frame_sender {
+                                match tx.send(bgra) {
+                                    Ok(_) => self.stream.frame_count += 1,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[Stream] Channel send failed: {e}, stopping stream"
+                                        );
+                                        self.stop_streaming();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
