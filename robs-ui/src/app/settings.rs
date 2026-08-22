@@ -60,7 +60,12 @@ impl RobsApp {
                         });
                 });
             });
+        // Closing the Settings window commits the anomaly settings to disk.
+        let was_open = self.show_settings;
         self.show_settings = show_settings;
+        if was_open && !show_settings {
+            self.save_anomaly_settings();
+        }
     }
 
     fn settings_general(&mut self, ui: &mut egui::Ui) {

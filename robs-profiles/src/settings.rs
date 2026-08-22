@@ -1,4 +1,8 @@
+use anyhow::{Context, Result};
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Settings for the always-on Blackbox Dual Recording Engine. Local-only for
 /// now; the `cloud` field is reserved so a future cloud-archive sink can be
@@ -70,7 +74,10 @@ impl BlackboxSettings {
 /// trigger, exports a short MP4 clip spanning a configurable pre-roll +
 /// post-roll window. See `robs-outputs::anomaly::AnomalyConfig` for the runtime
 /// struct these are projected into.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Missing fields deserialize to the struct defaults, so a partial or
+/// hand-edited `anomaly` section still loads.
+#[serde(default)]
 pub struct AnomalySettings {
     /// Master switch. Unlike the always-on Blackbox recorder, the buffer must
     /// be explicitly started by the user (Start/Stop).
@@ -128,9 +135,73 @@ impl Default for AnomalySettings {
 }
 
 impl AnomalySettings {
+    /// Load the anomaly section from the canonical settings file, falling
+    /// back to defaults when it is absent. A file that exists but cannot be
+    /// parsed (or has no `anomaly` key) warns on stderr and yields defaults —
+    /// a bad hand-edit must never keep the app from starting.
     pub fn load_or_default() -> Self {
-        Self::default()
+        let Some(path) = settings_file_path() else {
+            return Self::default();
+        };
+        match Self::load_from(&path) {
+            Some(settings) => settings,
+            None => {
+                if path.exists() {
+                    eprintln!(
+                        "[Settings] anomaly settings unreadable, using defaults: {}",
+                        path.display()
+                    );
+                }
+                Self::default()
+            }
+        }
     }
+
+    /// Persist the anomaly section to the canonical settings file.
+    pub fn save(&self) -> Result<()> {
+        let path = settings_file_path().context("could not determine the config directory")?;
+        self.save_to(&path)
+    }
+
+    /// Read the `anomaly` section of the JSON object at `path`.
+    /// `None` when the file is missing, invalid JSON, or has no `anomaly`
+    /// key. Unknown fields inside the section are ignored so forward-added
+    /// settings don't brick older builds.
+    pub fn load_from(path: &Path) -> Option<Self> {
+        let content = fs::read_to_string(path).ok()?;
+        let root: serde_json::Value = serde_json::from_str(&content).ok()?;
+        serde_json::from_value(root.get("anomaly")?.clone()).ok()
+    }
+
+    /// Write the anomaly section into the JSON object at `path`, creating the
+    /// file (and parent directories) as needed. The file is a plain JSON
+    /// object keyed by section (`{"anomaly": {...}}`) so further sections
+    /// (blackbox, general, ...) can be added later without a migration; any
+    /// unrelated sections already present are preserved. An existing file
+    /// that fails to parse is replaced rather than propagated as an error —
+    /// saving current settings should always win over a corrupt file.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        let mut root: serde_json::Value = fs::read_to_string(path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let obj = root
+            .as_object_mut()
+            .context("settings file root is not a JSON object")?;
+        obj.insert("anomaly".into(), serde_json::to_value(self)?);
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(&root)?)?;
+        Ok(())
+    }
+}
+
+/// Canonical settings file: `<config_dir>/settings.json`, sibling of the
+/// `profiles/` directory `ProfileManager` uses (same `ProjectDirs` root).
+pub fn settings_file_path() -> Option<PathBuf> {
+    ProjectDirs::from("ai", "robs", "ROBS").map(|d| d.config_dir().join("settings.json"))
 }
 
 impl AppSettings {
@@ -143,7 +214,7 @@ impl AppSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     pub general: GeneralSettings,
     pub video: VideoSettings,
@@ -154,19 +225,6 @@ pub struct AppSettings {
     pub anomaly: AnomalySettings,
 }
 
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            general: GeneralSettings::default(),
-            video: VideoSettings::default(),
-            audio: AudioSettings::default(),
-            hotkeys: Vec::new(),
-            ui: UiSettings::default(),
-            blackbox: BlackboxSettings::default(),
-            anomaly: AnomalySettings::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralSettings {
