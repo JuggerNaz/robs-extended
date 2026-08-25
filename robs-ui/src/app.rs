@@ -265,6 +265,7 @@ impl RobsApp {
                 recording_frame_sender: None,
                 recording_ffmpeg_stdin: None,
                 last_frame_time: None,
+                timer_last_tick: None,
                 frame_count: 0,
             },
             stream: StreamState {
@@ -272,6 +273,7 @@ impl RobsApp {
                 writer_thread: None,
                 stop_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 frame_sender: None,
+                timer_last_tick: None,
                 frame_count: 0,
             },
             preview: PreviewState {
@@ -283,6 +285,7 @@ impl RobsApp {
                 last_preview_capture: std::time::Instant::now(),
                 frame_buffer: std::collections::HashMap::new(),
                 preview_textures: std::collections::HashMap::new(),
+                last_output_frame: None,
             },
             annotation: AnnotationState {
                 show_annotations: true,
@@ -367,15 +370,30 @@ impl RobsApp {
                 }
             }
         }
+        // Elapsed timers advance by the wall-clock delta between UI ticks,
+        // NOT by one per tick: egui repaints on every input event, so a
+        // per-tick increment raced the timer whenever the mouse moved.
         if self.streaming {
             if !self.streaming_paused {
-                self.streaming_time += 1;
+                let now = std::time::Instant::now();
+                if let Some(last) = self.stream.timer_last_tick {
+                    self.streaming_time += last.elapsed().as_millis() as u64;
+                }
+                self.stream.timer_last_tick = Some(now);
+            } else {
+                self.stream.timer_last_tick = None;
             }
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
         if self.record.recording {
             if !self.record.recording_paused {
-                self.record.recording_time += 1;
+                let now = std::time::Instant::now();
+                if let Some(last) = self.record.timer_last_tick {
+                    self.record.recording_time += last.elapsed().as_millis() as u64;
+                }
+                self.record.timer_last_tick = Some(now);
+            } else {
+                self.record.timer_last_tick = None;
             }
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
@@ -505,6 +523,19 @@ impl eframe::App for RobsApp {
 
         // Process preview frames (recording + blackbox tap hook into this).
         self.process_preview_frames(ctx);
+
+        // Encoders timestamp piped frames at a FIXED framerate, so while one
+        // is live the UI must tick at the frame interval even when idle —
+        // otherwise frames are only produced on mouse input (fast) and the
+        // 1s status repaint (slow), and the video fast-forwards through the
+        // idle stretches on playback.
+        let encoder_live = (self.record.recording && !self.record.recording_paused)
+            || (self.streaming && !self.streaming_paused);
+        if encoder_live && has_capture_source {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(
+                1.0 / self.fps_setting.max(1.0),
+            ));
+        }
 
         // Manage preview capture based on source visibility.
         if has_capture_source && !self.preview.preview_capture_active {

@@ -69,6 +69,14 @@ impl RobsApp {
             .map(|frame| (frame.data, frame.width, frame.height))
     }
 
+    /// True when at least one frame interval has passed since the last frame
+    /// handed to an encoder; updates the pacer timestamp when due. Shared by
+    /// the fresh-compose path and the duplicate-resend path so exactly one
+    /// frame per interval reaches FFmpeg regardless of capture activity.
+    fn encoder_frame_due(&mut self) -> bool {
+        frame_pacer_due(&mut self.record.last_frame_time, self.fps_setting)
+    }
+
     /// Compose the shared output frame for whichever encoders are active
     /// (recording and/or streaming). This reuses the preview capture frame -
     /// no double capture needed - and exists so both consumers get the SAME
@@ -79,15 +87,9 @@ impl RobsApp {
     /// for FFmpeg. Returns `None` when the rate limiter skipped this frame.
     fn compose_output_frame(&mut self, rgba_data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
         // Rate limit to target FPS
-        let target_frame_interval = std::time::Duration::from_secs_f32(1.0 / self.fps_setting);
-
-        let now = std::time::Instant::now();
-        if let Some(last_time) = self.record.last_frame_time {
-            if now.duration_since(last_time) < target_frame_interval {
-                return None; // Skip this frame - not enough time elapsed
-            }
+        if !self.encoder_frame_due() {
+            return None;
         }
-        self.record.last_frame_time = Some(now);
 
         let out_w = self.output_width;
         let out_h = self.output_height;
@@ -154,14 +156,59 @@ impl RobsApp {
             self.take_snapshot = false;
         }
 
+        // Remember so a later tick with no fresh frame can duplicate it.
+        self.preview.last_output_frame = Some(bgra_data.clone());
+
         Some(bgra_data)
+    }
+
+    /// Re-send the last composed output frame to any live encoder when the
+    /// pacer is due. FFmpeg timestamps piped raw frames at a fixed
+    /// `-framerate`, so gaps in frame production compress wall-clock time on
+    /// playback (the fast-forward-recording bug): when a UI tick produced no
+    /// fresh frame (static screen, DXGI timeout, webcam lag), the previous
+    /// frame is repeated instead.
+    fn resend_last_output_frame(&mut self) {
+        let recording_active = self.record.recording
+            && !self.record.recording_paused
+            && self.record.recording_frame_sender.is_some();
+        let streaming_active =
+            self.streaming && !self.streaming_paused && self.stream.frame_sender.is_some();
+        if (!recording_active && !streaming_active) || !self.encoder_frame_due() {
+            return;
+        }
+        let Some(frame) = self.preview.last_output_frame.clone() else {
+            return; // no frame composed yet this session
+        };
+        if recording_active {
+            if let Some(tx) = &self.record.recording_frame_sender {
+                match tx.send(frame.clone()) {
+                    Ok(_) => self.record.frame_count += 1,
+                    Err(e) => {
+                        eprintln!("[DXGI-Record] Duplicate send failed: {e}, stopping recording");
+                        self.stop_recording();
+                        return;
+                    }
+                }
+            }
+        }
+        if streaming_active {
+            if let Some(tx) = &self.stream.frame_sender {
+                if tx.send(frame).is_err() {
+                    eprintln!("[Stream] Duplicate send failed, stopping stream");
+                    self.stop_streaming();
+                }
+            }
+        }
     }
 
     pub(crate) fn process_preview_frames(&mut self, ctx: &egui::Context) {
         // Limit preview capture to target FPS to avoid excessive CPU usage
-        // from BGRA->RGBA conversion and texture upload
+        // from BGRA->RGBA conversion and texture upload. Encoder pacing is
+        // NOT gated here — see `resend_last_output_frame` below.
         let target_frame_interval = std::time::Duration::from_secs_f32(1.0 / self.fps_setting);
         if self.preview.last_preview_capture.elapsed() < target_frame_interval {
+            self.resend_last_output_frame();
             return;
         }
         self.preview.last_preview_capture = std::time::Instant::now();
@@ -181,11 +228,13 @@ impl RobsApp {
             .unwrap_or_default();
 
         if capture_items.is_empty() {
-            // No capture sources - stop preview
+            // No capture sources - stop preview. A live encoder still gets
+            // duplicated frames so its output keeps real-time pace.
             if self.preview.preview_capture_active {
                 self.preview.preview_capture_active = false;
                 eprintln!("[Preview] No capture sources, stopping preview");
             }
+            self.resend_last_output_frame();
             return;
         }
 
@@ -320,6 +369,12 @@ impl RobsApp {
             .retain(|id, _| active_ids.contains(id));
         self.webcam_captures
             .retain(|id, _| active_ids.contains(id));
+
+        // Frame duplication: when this tick composed no fresh frame (e.g.
+        // DXGI timed out on an unchanged screen), repeat the last one so the
+        // encoders' constant-framerate stream stays wall-clock paced. A
+        // no-op when fresh frames were sent (the pacer is not due).
+        self.resend_last_output_frame();
     }
 
     /// Scale captured frame to output resolution (OBS-style: preview matches output)
@@ -374,5 +429,64 @@ impl RobsApp {
         }
 
         output
+    }
+}
+
+/// Pacing decision for encoder frame delivery: `true` when at least one
+/// frame interval (1 / `fps`) has elapsed since `last_frame_time`, updating
+/// the timestamp only when due. This is the wall-clock heart of the
+/// recording/streaming pipelines — both the fresh-frame path and the
+/// duplicate-frame path consult it, so FFmpeg's constant-framerate stdin
+/// receives exactly one frame per interval whether or not the screen changed.
+pub(crate) fn frame_pacer_due(
+    last_frame_time: &mut Option<std::time::Instant>,
+    fps: f32,
+) -> bool {
+    let interval = std::time::Duration::from_secs_f32(1.0 / fps.max(1.0));
+    let now = std::time::Instant::now();
+    if let Some(last_time) = last_frame_time {
+        if now.duration_since(*last_time) < interval {
+            return false; // Skip this frame - not enough time elapsed
+        }
+    }
+    *last_frame_time = Some(now);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frame_pacer_due;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_frame_is_always_due() {
+        let mut last = None;
+        assert!(frame_pacer_due(&mut last, 30.0));
+        assert!(last.is_some(), "due updates the timestamp");
+    }
+
+    #[test]
+    fn not_due_within_the_frame_interval() {
+        let mut last = Some(Instant::now());
+        assert!(!frame_pacer_due(&mut last, 30.0));
+        // Timestamp must be untouched when not due, so the remaining time to
+        // the interval boundary is not repeatedly reset.
+        assert!(last.unwrap().elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn due_again_after_one_interval() {
+        let stale = Instant::now() - Duration::from_millis(100);
+        let mut last = Some(stale);
+        assert!(frame_pacer_due(&mut last, 30.0));
+        // And immediately after a due frame, the next one is not due.
+        assert!(!frame_pacer_due(&mut last, 30.0));
+    }
+
+    #[test]
+    fn degenerate_fps_is_clamped_not_panicking() {
+        // fps = 0 would divide by zero; the clamp treats it as 1 fps.
+        let mut last = None;
+        assert!(frame_pacer_due(&mut last, 0.0));
     }
 }

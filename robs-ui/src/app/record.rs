@@ -350,6 +350,8 @@ impl RobsApp {
         self.record.recording_time = 0;
         self.record.frame_count = 0;
         self.record.last_frame_time = None;
+        // Never duplicate a stale frame from a previous session into this one.
+        self.preview.last_output_frame = None;
         self.record.recording_start_time = Some(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -418,7 +420,7 @@ impl RobsApp {
         self.record.ffmpeg_recording_handle = None;
         self.record.recording = false;
         self.record.recording_paused = false;
-        let elapsed = self.record.recording_time;
+        let elapsed = self.record.recording_time / 1000; // ms → s
         self.record.recording_time = 0;
 
         let duration_str = Self::format_time(elapsed);

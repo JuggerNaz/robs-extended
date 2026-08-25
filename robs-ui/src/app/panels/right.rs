@@ -258,7 +258,7 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
                                     ui.end_row();
                                     if self.streaming {
                                         ui.label("Duration:");
-                                        ui.label(Self::format_time(self.streaming_time));
+                                        ui.label(Self::format_time(self.streaming_time / 1000));
                                         ui.end_row();
                                     }
                                     ui.label("Frame Rate:");
