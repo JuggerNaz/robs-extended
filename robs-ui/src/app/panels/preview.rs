@@ -57,8 +57,8 @@ impl RobsApp {
 
                 // A draw tool overrides source-item dragging so the canvas is
                 // free for drawing annotations.
-                let draw_active =
-                    self.annotation.show_annotations && self.annotation.annotation_tool.shape().is_some();
+                let draw_active = self.annotation.show_annotations
+                    && self.annotation.annotation_tool.shape().is_some();
 
                 // Render scene items
                 if let Some(scene) = scene {
@@ -292,7 +292,6 @@ impl RobsApp {
                     );
                     ui.add_space(7.0);
                     ui.horizontal_centered(|ui| {
-
                         ui.add_space(10.0);
 
                         let (rec_icon, rec_label, rec_color) = if !self.record.recording {
@@ -305,7 +304,13 @@ impl RobsApp {
                         // START requires at least one source in the scene;
                         // while recording the button stays live for Pause/Resume.
                         let rec_enabled = self.record.recording || self.scene_has_sources();
-                        if Self::quick_action_button(ui, rec_icon, rec_label, rec_color, rec_enabled) {
+                        if Self::quick_action_button(
+                            ui,
+                            rec_icon,
+                            rec_label,
+                            rec_color,
+                            rec_enabled,
+                        ) {
                             if !self.record.recording {
                                 self.start_recording();
                             } else if self.record.recording_paused {
@@ -325,7 +330,7 @@ impl RobsApp {
                             && (self.record.recording || self.streaming)
                         {
                             if self.record.recording {
-                                self.stop_recording();
+                                self.stop_recording(ui.ctx());
                             }
                             if self.streaming {
                                 self.stop_streaming();
@@ -369,17 +374,28 @@ impl RobsApp {
                             self.take_snapshot = true;
                         }
 
+                        // MARK toggles a clip mark (Mark In / Mark Out): a
+                        // zero-cost frame-position bookmark; clips are
+                        // stream-copied out of the recording after Stop. Only
+                        // anchored on the piped capture pipeline (`clips.rs`).
+                        let mark_open = self.record.clip_mark_start.is_some();
+                        let mark_enabled = self.record.recording
+                            && self.record.clip_marking_supported
+                            && self.record.clip_export_pending == 0;
+                        let mark_color = if mark_open {
+                            egui::Color32::from_rgb(255, 200, 60)
+                        } else {
+                            egui::Color32::from_rgb(180, 110, 0)
+                        };
                         if Self::quick_action_button(
                             ui,
                             "\u{2691}",
                             "MARK",
-                            egui::Color32::from_rgb(180, 110, 0),
-                            true,
-                        ) {
-                            self.log_event(
-                                format!("Marker #{} added", self.event_log.len()),
-                                EventLogKind::Info,
-                            );
+                            mark_color,
+                            mark_enabled,
+                        ) && mark_enabled
+                        {
+                            self.toggle_clip_mark();
                         }
 
                         if Self::quick_action_button(
@@ -401,8 +417,11 @@ impl RobsApp {
                             egui::pos2(rect.center().x, rect.min.y + 30.0),
                             egui::vec2(190.0, 30.0),
                         );
-                        ui.painter()
-                            .rect_filled(toast_rect, 4.0, egui::Color32::from_rgb(20, 90, 45));
+                        ui.painter().rect_filled(
+                            toast_rect,
+                            4.0,
+                            egui::Color32::from_rgb(20, 90, 45),
+                        );
                         ui.painter().text(
                             toast_rect.center(),
                             egui::Align2::CENTER_CENTER,

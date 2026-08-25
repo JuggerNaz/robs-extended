@@ -16,6 +16,7 @@ mod annotations;
 mod anomaly;
 mod blackbox;
 mod capture;
+mod clips;
 mod devices;
 mod panels;
 mod record;
@@ -34,7 +35,7 @@ use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
 use robs_profiles::profile::ProfileManager;
 use state::{
-    AnomalyState, AnnotationState, AudioChannel, AudioDeviceInfo, BlackboxState, EditingState,
+    AnnotationState, AnomalyState, AudioChannel, AudioDeviceInfo, BlackboxState, EditingState,
     EventLogEntry, EventLogKind, Panel, PreviewState, RecordState, StreamState,
 };
 use std::collections::VecDeque;
@@ -115,7 +116,10 @@ pub struct RobsApp {
     // Maps scene-item IDs to window handles (HWND) for window-capture sources.
     window_hwnds: std::collections::HashMap<robs_core::SceneItemId, isize>,
     // Active webcam capture sessions keyed by scene-item ID.
-    webcam_captures: std::collections::HashMap<robs_core::SceneItemId, robs_sources::native_capture::WebcamCapture>,
+    webcam_captures: std::collections::HashMap<
+        robs_core::SceneItemId,
+        robs_sources::native_capture::WebcamCapture,
+    >,
     // Flag to capture a snapshot on the next recorded frame.
     take_snapshot: bool,
     // Monotonic counter so rapid snapshots don't collide within the same second.
@@ -267,6 +271,11 @@ impl RobsApp {
                 last_frame_time: None,
                 timer_last_tick: None,
                 frame_count: 0,
+                clip_marks: Vec::new(),
+                clip_mark_start: None,
+                clip_export_rx: None,
+                clip_export_pending: 0,
+                clip_marking_supported: false,
             },
             stream: StreamState {
                 ffmpeg_handle: None,
@@ -436,6 +445,14 @@ impl RobsApp {
         if !anomaly_events.is_empty() {
             self.apply_anomaly_events(anomaly_events);
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+
+        // Drain clip-export results from the post-stop cutting thread: log
+        // each saved/failed clip and update the busy counter.
+        let clip_events = self.drain_clip_export_events();
+        if !clip_events.is_empty() {
+            self.apply_clip_export_events(clip_events);
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 

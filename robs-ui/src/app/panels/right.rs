@@ -7,7 +7,12 @@ use eframe::egui;
 
 impl RobsApp {
     pub(crate) fn right_panel(&mut self, ctx: &egui::Context) {
-        if self.show_audio || self.show_chat || self.show_stats || self.show_controls || self.show_event_log {
+        if self.show_audio
+            || self.show_chat
+            || self.show_stats
+            || self.show_controls
+            || self.show_event_log
+        {
             egui::SidePanel::right("right_panel")
                 .default_width(300.0)
                 .min_width(120.0)
@@ -164,8 +169,45 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
                                         self.record.recording,
                                         egui::Button::new(egui::RichText::new("\u{23F9} Stop Record").color(egui::Color32::RED)),
                                     ).clicked() {
-                                        self.stop_recording();
+                                        self.stop_recording(ui.ctx());
                                     }
+
+                                    // ---- Clip marking ----
+                                    // A mark is just a frame position; clips are
+                                    // stream-copied out of the recording when
+                                    // it stops (see `clips.rs`). Anchored only
+                                    // on the piped (DXGI / webcam) pipeline.
+                                    let mark_open = self.record.clip_mark_start.is_some();
+                                    let queued = self.record.clip_marks.len();
+                                    let mark_label = if mark_open {
+                                        format!("\u{23F1} Mark Out ({queued} queued)")
+                                    } else {
+                                        "\u{23F1} Mark In".to_string()
+                                    };
+                                    let can_mark = self.record.recording
+                                        && self.record.clip_marking_supported
+                                        && self.record.clip_export_pending == 0;
+                                    let mark_color = if mark_open {
+                                        egui::Color32::from_rgb(255, 200, 60)
+                                    } else {
+                                        egui::Color32::from_rgb(190, 160, 60)
+                                    };
+                                    let mark_resp = ui.add_enabled(
+                                        can_mark,
+                                        egui::Button::new(
+                                            egui::RichText::new(mark_label).color(mark_color).strong(),
+                                        ),
+                                    );
+                                    if mark_resp.clicked() {
+                                        self.toggle_clip_mark();
+                                    }
+                                    mark_resp.on_hover_text(if can_mark {
+                                        "Mark a highlight; the clip is cut automatically when recording stops"
+                                    } else if self.record.recording {
+                                        "Clip marking needs a display/webcam source (window capture is not anchored)"
+                                    } else {
+                                        "Start recording to mark clips"
+                                    });
                                     ui.separator();
                                     if ui.button("Studio Mode").clicked() {}
                                     if ui.button("Settings").clicked() {
@@ -303,8 +345,7 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
             "robs_event_log_{}.pdf",
             chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
         );
-        let start_dir =
-            std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users".to_string());
+        let start_dir = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users".to_string());
         let Some(path) = rfd::FileDialog::new()
             .set_directory(start_dir)
             .set_file_name(default_name)
@@ -314,16 +355,14 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
             return; // user cancelled the dialog
         };
 
-        let mut report = robs_outputs::Report::new("ROBS Event Log Report", "Session event log export");
+        let mut report =
+            robs_outputs::Report::new("ROBS Event Log Report", "Session event log export");
         report.push_meta(
             "Generated",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         );
         report.push_meta("Entries", self.event_log.len().to_string());
-        report.push_meta(
-            "Application",
-            format!("ROBS {}", robs_core::ROBS_VERSION),
-        );
+        report.push_meta("Application", format!("ROBS {}", robs_core::ROBS_VERSION));
         for entry in &self.event_log {
             let kind = match entry.kind {
                 EventLogKind::Stream => "Stream",

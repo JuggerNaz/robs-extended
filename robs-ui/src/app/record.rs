@@ -1,11 +1,21 @@
 //! FFmpeg-based recording start/stop. Extracted verbatim from `app.rs`.
 
-use robs_core::scene::CaptureSource;
+use super::clips::ClipMark;
 use super::state::EventLogKind;
 use super::RobsApp;
+use robs_core::scene::CaptureSource;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
+
+/// GOP size in frames: fps × keyframe interval, minimum 1. Shared by the
+/// NVENC and x264 branches so keyframe cadence — and therefore stream-copy
+/// clip-cut snapping (see `clips.rs`) — matches the configured interval on
+/// both encoders. Without it x264 defaults to a ~250-frame GOP (~8s at
+/// 30fps), leaving clip starts landing far before their marks.
+pub(crate) fn gop_size(fps: f32, keyframe_interval: u32) -> u32 {
+    ((fps * keyframe_interval as f32) as u32).max(1)
+}
 
 impl RobsApp {
     /// True when the current scene contains at least one source. Recording
@@ -86,20 +96,44 @@ impl RobsApp {
                         eprintln!("[Recording] Found window_capture source: {}", title);
                         (format!("title={}", title), 0, 0, 0, 0, true)
                     }
-                    Some(CaptureSource::Display { x, y, width, height, label }) => {
+                    Some(CaptureSource::Display {
+                        x,
+                        y,
+                        width,
+                        height,
+                        label,
+                    }) => {
                         eprintln!("[Recording] Found monitor_capture source: {}", label);
                         eprintln!(
                             "[Recording] Using monitor at ({},{}) - {}x{}",
                             x, y, width, height
                         );
-                        ("desktop".to_string(), x, y, width as i32, height as i32, false)
+                        (
+                            "desktop".to_string(),
+                            x,
+                            y,
+                            width as i32,
+                            height as i32,
+                            false,
+                        )
                     }
-                    Some(CaptureSource::Webcam { device, width, height }) => {
+                    Some(CaptureSource::Webcam {
+                        device,
+                        width,
+                        height,
+                    }) => {
                         eprintln!(
                             "[Recording] Found webcam source: {} ({}x{})",
                             device, width, height
                         );
-                        ("webcam".to_string(), 0, 0, width as i32, height as i32, false)
+                        (
+                            "webcam".to_string(),
+                            0,
+                            0,
+                            width as i32,
+                            height as i32,
+                            false,
+                        )
                     }
                     None => {
                         eprintln!("[Recording] No capture source found in scene!");
@@ -207,9 +241,8 @@ impl RobsApp {
             ffmpeg_args.push("-bufsize".into());
             ffmpeg_args.push(format!("{}k", self.recording_bitrate * 2));
             // Keyframe interval (gop size = fps * keyframe_interval)
-            let gop_size = (self.fps_setting * self.keyframe_interval as f32) as u32;
             ffmpeg_args.push("-g".into());
-            ffmpeg_args.push(gop_size.to_string());
+            ffmpeg_args.push(gop_size(self.fps_setting, self.keyframe_interval).to_string());
             // Two-pass multipass encoding (quarter resolution for first pass)
             ffmpeg_args.push("-multipass".into());
             ffmpeg_args.push("fullres".into());
@@ -221,6 +254,9 @@ impl RobsApp {
             ffmpeg_args.push("zerolatency".into());
             ffmpeg_args.push("-crf".into());
             ffmpeg_args.push("23".into());
+            // Same keyframe cadence as NVENC (see `gop_size` above).
+            ffmpeg_args.push("-g".into());
+            ffmpeg_args.push(gop_size(self.fps_setting, self.keyframe_interval).to_string());
         }
 
         // Frame rate
@@ -369,6 +405,15 @@ impl RobsApp {
         self.record.recording_paused = false;
         self.record.recording_time = 0;
         self.record.frame_count = 0;
+        // New recording session: reset clip-mark state. Marks anchor on
+        // `frame_count`, which is only a valid file-position on the piped
+        // (DXGI / webcam rawvideo) pipeline — the gdigrab window-capture
+        // path lets FFmpeg pull frames itself, so marking stays disabled
+        // there. In-flight exports from a previous session are deliberately
+        // NOT reset so their results still drain and log.
+        self.record.clip_marks.clear();
+        self.record.clip_mark_start = None;
+        self.record.clip_marking_supported = use_dxgi_recording;
         self.record.last_frame_time = None;
         // Never duplicate a stale frame from a previous session into this one.
         self.preview.last_output_frame = None;
@@ -384,11 +429,12 @@ impl RobsApp {
         );
     }
 
-    pub(crate) fn stop_recording(&mut self) {
+    pub(crate) fn stop_recording(&mut self, ctx: &eframe::egui::Context) {
         eprintln!("[Recording] Stopping recording...");
 
         // 1. Signal the writer thread to stop
-        self.record.recording_stop_flag
+        self.record
+            .recording_stop_flag
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
         // 2. Drop the sender to close the channel - this signals the writer thread
@@ -403,6 +449,7 @@ impl RobsApp {
 
         // 4. Wait for FFmpeg to finalize the file after stdin EOF
         // Since we removed audio, FFmpeg should exit quickly after video EOF
+        let mut finalized_cleanly = false;
         if let Some(mut child) = self.record.ffmpeg_recording_handle.take() {
             eprintln!("[Recording] Waiting for FFmpeg to finalize...");
 
@@ -413,6 +460,7 @@ impl RobsApp {
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         eprintln!("[Recording] FFmpeg exited with: {}", status);
+                        finalized_cleanly = status.success();
                         break;
                     }
                     Ok(None) => {
@@ -433,8 +481,42 @@ impl RobsApp {
             }
         }
 
+        // 4b. Clip marks: auto-close any open mark at the final frame count,
+        // then hand all closed marks to a background thread that stream-copies
+        // each span out of the finalized file (see `clips.rs`). Only when
+        // FFmpeg exited cleanly — a force-killed mp4 may lack its index and
+        // be unplayable, so cutting it would produce garbage.
+        if let Some(start) = self.record.clip_mark_start.take() {
+            if self.record.frame_count > start {
+                self.record
+                    .clip_marks
+                    .push(ClipMark::new(start, self.record.frame_count));
+                self.log_event(
+                    "Recording stopped with a clip mark open \u{2014} auto-closed",
+                    EventLogKind::Record,
+                );
+            }
+        }
+        let clip_marks = std::mem::take(&mut self.record.clip_marks);
+        if !clip_marks.is_empty() {
+            if finalized_cleanly {
+                self.log_event(
+                    format!("Extracting {} clip(s)\u{2026}", clip_marks.len()),
+                    EventLogKind::Record,
+                );
+                let path = self.record.last_recording_path.clone();
+                self.start_clip_exports(path, clip_marks, self.fps_setting, ctx);
+            } else {
+                self.log_event(
+                    "Recording finalized abnormally; clip marks skipped \u{2014} file may be unplayable",
+                    EventLogKind::Record,
+                );
+            }
+        }
+
         // 5. Reset state for next recording session
-        self.record.recording_stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.record.recording_stop_flag =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.record.recording_dxgi_thread = None;
         self.record.recording_frame_sender = None;
         self.record.ffmpeg_recording_handle = None;
@@ -477,5 +559,23 @@ impl RobsApp {
             format!("Recording stopped ({})", duration_str),
             EventLogKind::Record,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gop_size;
+
+    #[test]
+    fn gop_size_matches_fps_times_interval() {
+        assert_eq!(gop_size(30.0, 2), 60);
+        assert_eq!(gop_size(60.0, 2), 120);
+        assert_eq!(gop_size(29.97, 2), 59);
+    }
+
+    #[test]
+    fn gop_size_clamps_to_one() {
+        assert_eq!(gop_size(30.0, 0), 1);
+        assert_eq!(gop_size(0.0, 2), 1);
     }
 }

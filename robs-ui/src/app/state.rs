@@ -87,6 +87,23 @@ pub(crate) struct RecordState {
     /// paused or stopped so paused time is excluded on resume.
     pub(crate) timer_last_tick: Option<std::time::Instant>,
     pub(crate) frame_count: u64,
+    /// Closed clip marks (frame positions) for the current recording session.
+    /// See `clips.rs`: file position = frame_count / fps, so a mark is just
+    /// two frame-position integers; clips are stream-copied after stop.
+    pub(crate) clip_marks: Vec<super::clips::ClipMark>,
+    /// Start frame of the currently open clip mark, if any (Mark In pressed,
+    /// Mark Out not yet).
+    pub(crate) clip_mark_start: Option<u64>,
+    /// Results from the post-stop clip export thread, drained each tick in
+    /// `handle_events` (same pattern as the Anomaly engine channel).
+    pub(crate) clip_export_rx: Option<std::sync::mpsc::Receiver<super::clips::ClipExportResult>>,
+    /// Clip exports still in flight (greys the Mark button while > 0).
+    pub(crate) clip_export_pending: u32,
+    /// True when this session pipes frames from the UI tick (DXGI / webcam
+    /// rawvideo pipeline) — the only pipeline where `frame_count` anchors
+    /// file position. The gdigrab window-capture path lets FFmpeg pull frames
+    /// itself, so marking there stays disabled.
+    pub(crate) clip_marking_supported: bool,
 }
 
 /// RTMP streaming-session runtime state.
