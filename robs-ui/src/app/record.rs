@@ -8,7 +8,27 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 impl RobsApp {
+    /// True when the current scene contains at least one source. Recording
+    /// is refused otherwise — without a source the pipeline would silently
+    /// fall back to desktop capture.
+    pub(crate) fn scene_has_sources(&self) -> bool {
+        self.scenes
+            .current_scene()
+            .is_some_and(|scene| scene.item_count() > 0)
+    }
+
     pub(crate) fn start_recording(&mut self) {
+        // Refuse to record an empty scene: every record button greys out,
+        // and this guard backs them up for any other callers.
+        if !self.scene_has_sources() {
+            eprintln!("[Recording] Refused: current scene has no sources");
+            self.log_event(
+                "Cannot start recording: add a source to the scene first",
+                EventLogKind::Record,
+            );
+            return;
+        }
+
         // Force stderr output to be visible
         use std::io::Write;
         let _ = std::io::stderr().write_all(b"[Recording] start_recording() called\n");

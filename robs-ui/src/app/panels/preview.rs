@@ -302,7 +302,10 @@ impl RobsApp {
                         } else {
                             ("\u{23F8}", "PAUSE", egui::Color32::from_rgb(200, 150, 0))
                         };
-                        if Self::quick_action_button(ui, rec_icon, rec_label, rec_color, true) {
+                        // START requires at least one source in the scene;
+                        // while recording the button stays live for Pause/Resume.
+                        let rec_enabled = self.record.recording || self.scene_has_sources();
+                        if Self::quick_action_button(ui, rec_icon, rec_label, rec_color, rec_enabled) {
                             if !self.record.recording {
                                 self.start_recording();
                             } else if self.record.recording_paused {
