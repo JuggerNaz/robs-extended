@@ -225,7 +225,7 @@ impl RobsApp {
         self.stream.ffmpeg_handle = None;
 
         let was_streaming = self.streaming;
-        let elapsed = self.streaming_time;
+        let elapsed = self.streaming_time / 1000; // ms → s
         self.streaming = false;
         self.streaming_paused = false;
         self.streaming_time = 0;

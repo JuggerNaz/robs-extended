@@ -70,6 +70,9 @@ pub(crate) enum EventLogKind {
 pub(crate) struct RecordState {
     pub(crate) recording: bool,
     pub(crate) recording_paused: bool,
+    /// Elapsed recording time in **milliseconds**, accumulated from the UI
+    /// tick's wall-clock delta. (It used to be `+= 1` per repaint, which
+    /// raced whenever mouse input raised the repaint rate.)
     pub(crate) recording_time: u64,
     pub(crate) recording_start_time: Option<u64>,
     pub(crate) last_recording_path: String,
@@ -80,6 +83,9 @@ pub(crate) struct RecordState {
     pub(crate) recording_frame_sender: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     pub(crate) recording_ffmpeg_stdin: Option<std::process::ChildStdin>,
     pub(crate) last_frame_time: Option<std::time::Instant>,
+    /// Wall-clock anchor for the elapsed-time accumulator. `None` while
+    /// paused or stopped so paused time is excluded on resume.
+    pub(crate) timer_last_tick: Option<std::time::Instant>,
     pub(crate) frame_count: u64,
 }
 
@@ -97,6 +103,9 @@ pub(crate) struct StreamState {
     pub(crate) writer_thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) frame_sender: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    /// Wall-clock anchor for `streaming_time` (milliseconds), mirroring
+    /// `RecordState::timer_last_tick`.
+    pub(crate) timer_last_tick: Option<std::time::Instant>,
     pub(crate) frame_count: u64,
 }
 
@@ -113,6 +122,11 @@ pub(crate) struct PreviewState {
     pub(crate) frame_buffer: std::collections::HashMap<String, Vec<u8>>,
     pub(crate) preview_textures:
         std::collections::HashMap<robs_core::SceneItemId, eframe::egui::TextureHandle>,
+    /// The last composed output-resolution BGRA frame handed to the encoders.
+    /// Re-sent when a UI tick produces no fresh frame (static screen, DXGI
+    /// timeout, webcam lag) so FFmpeg's constant-framerate input stays paced
+    /// to wall clock — the fix for fast-forwarding recordings.
+    pub(crate) last_output_frame: Option<Vec<u8>>,
 }
 
 /// Annotation / markup tool state.

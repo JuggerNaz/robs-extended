@@ -8,7 +8,27 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 impl RobsApp {
+    /// True when the current scene contains at least one source. Recording
+    /// is refused otherwise — without a source the pipeline would silently
+    /// fall back to desktop capture.
+    pub(crate) fn scene_has_sources(&self) -> bool {
+        self.scenes
+            .current_scene()
+            .is_some_and(|scene| scene.item_count() > 0)
+    }
+
     pub(crate) fn start_recording(&mut self) {
+        // Refuse to record an empty scene: every record button greys out,
+        // and this guard backs them up for any other callers.
+        if !self.scene_has_sources() {
+            eprintln!("[Recording] Refused: current scene has no sources");
+            self.log_event(
+                "Cannot start recording: add a source to the scene first",
+                EventLogKind::Record,
+            );
+            return;
+        }
+
         // Force stderr output to be visible
         use std::io::Write;
         let _ = std::io::stderr().write_all(b"[Recording] start_recording() called\n");
@@ -350,6 +370,8 @@ impl RobsApp {
         self.record.recording_time = 0;
         self.record.frame_count = 0;
         self.record.last_frame_time = None;
+        // Never duplicate a stale frame from a previous session into this one.
+        self.preview.last_output_frame = None;
         self.record.recording_start_time = Some(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -418,7 +440,7 @@ impl RobsApp {
         self.record.ffmpeg_recording_handle = None;
         self.record.recording = false;
         self.record.recording_paused = false;
-        let elapsed = self.record.recording_time;
+        let elapsed = self.record.recording_time / 1000; // ms → s
         self.record.recording_time = 0;
 
         let duration_str = Self::format_time(elapsed);

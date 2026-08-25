@@ -141,9 +141,15 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
                                     } else {
                                         ("\u{23F8}", "Pause", egui::Color32::from_rgb(210, 160, 0))
                                     };
-                                    if ui.add(egui::Button::new(
-                                        egui::RichText::new(format!("{} Record", r_icon)).color(r_color).strong(),
-                                    )).clicked() {
+                                    // Starting a recording requires at least one
+                                    // source in the scene; while recording the button
+                                    // stays live for Pause/Resume.
+                                    if ui.add_enabled(
+                                        self.record.recording || self.scene_has_sources(),
+                                        egui::Button::new(
+                                            egui::RichText::new(format!("{} Record", r_icon)).color(r_color).strong(),
+                                        ),
+                                    ).clicked() {
                                         if !self.record.recording {
                                             self.start_recording();
                                         } else if self.record.recording_paused {
@@ -258,7 +264,7 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
                                     ui.end_row();
                                     if self.streaming {
                                         ui.label("Duration:");
-                                        ui.label(Self::format_time(self.streaming_time));
+                                        ui.label(Self::format_time(self.streaming_time / 1000));
                                         ui.end_row();
                                     }
                                     ui.label("Frame Rate:");

@@ -240,6 +240,29 @@ fn long_lines_wrap_with_two_space_continuation_indent() {
 }
 
 #[test]
+fn text_operators_are_well_formed() {
+    // Regression guard for the "every log line stacked onto one line" export
+    // bug: the font resource name must be `/F<n>` (not `//F<n>`) and every
+    // text matrix must carry its full six operands (`1 0 0 1 x y Tm`).
+    let bytes = render_to_bytes(&sample_report(3));
+    assert_eq!(count(&bytes, b"//F"), 0, "font names must not be double-slashed");
+    let tm_count = count(&bytes, b" Tm ");
+    assert!(tm_count > 0, "expected text matrices in the content stream");
+    assert_eq!(
+        count(&bytes, b"1 0 0 1 "),
+        tm_count,
+        "every Tm must be preceded by the identity-matrix operands"
+    );
+    for font in [b"BT /F1 ", b"BT /F2 ", b"BT /F3 "] {
+        assert!(
+            bytes.windows(font.len()).any(|w| *w == *font),
+            "expected a well-formed {} operator",
+            String::from_utf8_lossy(font)
+        );
+    }
+}
+
+#[test]
 fn empty_report_still_renders_one_header_page() {
     let bytes = render_to_bytes(&Report::new("Only header", "no body"));
     assert_eq!(count(&bytes, b"/Type /Page "), 1);

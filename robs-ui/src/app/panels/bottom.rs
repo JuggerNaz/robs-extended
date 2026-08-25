@@ -26,7 +26,7 @@ impl RobsApp {
                             egui::RichText::new("\u{25CF} LIVE").color(egui::Color32::RED)
                         };
                         ui.label(live_text);
-                        ui.label(Self::format_time(self.streaming_time));
+                        ui.label(Self::format_time(self.streaming_time / 1000));
                     }
                     if self.record.recording {
                         let rec_text = if self.record.recording_paused {
@@ -35,7 +35,7 @@ impl RobsApp {
                             egui::RichText::new("\u{25CF} REC").color(egui::Color32::RED)
                         };
                         ui.label(rec_text);
-                        ui.label(Self::format_time(self.record.recording_time));
+                        ui.label(Self::format_time(self.record.recording_time / 1000));
                     }
                     // Blackbox safety-recorder health chip (no-op when disabled/idle).
                     self.blackbox_status_chip(ui);
