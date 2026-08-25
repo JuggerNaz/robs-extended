@@ -85,7 +85,12 @@ impl RobsApp {
     /// Rate-limits to the target FPS, scales to the output resolution, bakes
     /// annotations/overlays, handles the snapshot hook, and converts RGBA→BGRA
     /// for FFmpeg. Returns `None` when the rate limiter skipped this frame.
-    fn compose_output_frame(&mut self, rgba_data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    fn compose_output_frame(
+        &mut self,
+        rgba_data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<u8>> {
         // Rate limit to target FPS
         if !self.encoder_frame_due() {
             return None;
@@ -168,7 +173,7 @@ impl RobsApp {
     /// playback (the fast-forward-recording bug): when a UI tick produced no
     /// fresh frame (static screen, DXGI timeout, webcam lag), the previous
     /// frame is repeated instead.
-    fn resend_last_output_frame(&mut self) {
+    fn resend_last_output_frame(&mut self, ctx: &egui::Context) {
         let recording_active = self.record.recording
             && !self.record.recording_paused
             && self.record.recording_frame_sender.is_some();
@@ -186,7 +191,7 @@ impl RobsApp {
                     Ok(_) => self.record.frame_count += 1,
                     Err(e) => {
                         eprintln!("[DXGI-Record] Duplicate send failed: {e}, stopping recording");
-                        self.stop_recording();
+                        self.stop_recording(ctx);
                         return;
                     }
                 }
@@ -208,7 +213,7 @@ impl RobsApp {
         // NOT gated here — see `resend_last_output_frame` below.
         let target_frame_interval = std::time::Duration::from_secs_f32(1.0 / self.fps_setting);
         if self.preview.last_preview_capture.elapsed() < target_frame_interval {
-            self.resend_last_output_frame();
+            self.resend_last_output_frame(ctx);
             return;
         }
         self.preview.last_preview_capture = std::time::Instant::now();
@@ -234,7 +239,7 @@ impl RobsApp {
                 self.preview.preview_capture_active = false;
                 eprintln!("[Preview] No capture sources, stopping preview");
             }
-            self.resend_last_output_frame();
+            self.resend_last_output_frame(ctx);
             return;
         }
 
@@ -259,7 +264,13 @@ impl RobsApp {
                         .get(item_id)
                         .and_then(|&hwnd| robs_sources::native_capture::capture_window(hwnd))
                 }
-                CaptureSource::Display { x, y, width, height, label } => {
+                CaptureSource::Display {
+                    x,
+                    y,
+                    width,
+                    height,
+                    label,
+                } => {
                     let position = (*x, *y);
                     eprintln!(
                         "[Preview] Capturing Display Capture '{}' at position ({}, {}) - {}x{}",
@@ -337,7 +348,7 @@ impl RobsApp {
                                         eprintln!(
                                             "[DXGI-Record] Channel send failed: {e}, stopping recording"
                                         );
-                                        self.stop_recording();
+                                        self.stop_recording(ctx);
                                     }
                                 }
                             }
@@ -363,18 +374,17 @@ impl RobsApp {
         // Clean up textures, hwnd mappings, and webcam captures for sources that no longer exist
         let active_ids: std::collections::HashSet<SceneItemId> =
             capture_items.iter().map(|(id, _)| *id).collect();
-        self.preview.preview_textures
+        self.preview
+            .preview_textures
             .retain(|id, _| active_ids.contains(id));
-        self.window_hwnds
-            .retain(|id, _| active_ids.contains(id));
-        self.webcam_captures
-            .retain(|id, _| active_ids.contains(id));
+        self.window_hwnds.retain(|id, _| active_ids.contains(id));
+        self.webcam_captures.retain(|id, _| active_ids.contains(id));
 
         // Frame duplication: when this tick composed no fresh frame (e.g.
         // DXGI timed out on an unchanged screen), repeat the last one so the
         // encoders' constant-framerate stream stays wall-clock paced. A
         // no-op when fresh frames were sent (the pacer is not due).
-        self.resend_last_output_frame();
+        self.resend_last_output_frame(ctx);
     }
 
     /// Scale captured frame to output resolution (OBS-style: preview matches output)
@@ -438,10 +448,7 @@ impl RobsApp {
 /// recording/streaming pipelines — both the fresh-frame path and the
 /// duplicate-frame path consult it, so FFmpeg's constant-framerate stdin
 /// receives exactly one frame per interval whether or not the screen changed.
-pub(crate) fn frame_pacer_due(
-    last_frame_time: &mut Option<std::time::Instant>,
-    fps: f32,
-) -> bool {
+pub(crate) fn frame_pacer_due(last_frame_time: &mut Option<std::time::Instant>, fps: f32) -> bool {
     let interval = std::time::Duration::from_secs_f32(1.0 / fps.max(1.0));
     let now = std::time::Instant::now();
     if let Some(last_time) = last_frame_time {
