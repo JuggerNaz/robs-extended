@@ -141,11 +141,18 @@ fn push_pdf_string(out: &mut Vec<u8>, s: &str) {
 /// A single laid-out page: raw content-stream operators.
 struct PageContent(Vec<u8>);
 
-/// Text op: `BT /F<size> Tf r g b rg x y Tm (s) Tj ET`.
+/// Text op: `BT /F<n> <size> Tf r g b rg 1 0 0 1 x y Tm (s) Tj ET`.
+///
+/// `font` is the full resource name including the slash ("/F1"). The text
+/// matrix must carry all six operands (`1 0 0 1 x y`) — a bare `x y Tm` is
+/// invalid, and viewers that recover by ignoring it stack every line onto
+/// one position (the "everything on one line" export bug).
 fn text_op(out: &mut Vec<u8>, font: &str, size: f32, grey: f32, x: f32, y: f32, s: &str) {
-    out.extend_from_slice(b"BT /");
+    out.extend_from_slice(b"BT ");
     out.extend_from_slice(font.as_bytes());
-    out.extend_from_slice(format!(" {size} Tf {grey} {grey} {grey} rg {x:.2} {y:.2} Tm (").as_bytes());
+    out.extend_from_slice(
+        format!(" {size} Tf {grey} {grey} {grey} rg 1 0 0 1 {x:.2} {y:.2} Tm (").as_bytes(),
+    );
     push_pdf_string(out, s);
     out.extend_from_slice(b") Tj ET\n");
 }
