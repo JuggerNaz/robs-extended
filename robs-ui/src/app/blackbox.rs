@@ -71,14 +71,13 @@ impl RobsApp {
 
     /// Project the user's blackbox settings (+ active output dims/fps) into the
     /// runtime config the engine consumes. An empty `output_dir` resolves to a
-    /// `Blackbox/` subfolder of the recording path (or `%USERPROFILE%\Videos`
-    /// when no recording path is set), matching the main recorder's convention.
+    /// `Blackbox/` subfolder of the recording path (or the home `Videos`/
+    /// `Movies` folder when no recording path is set), matching the main
+    /// recorder's convention.
     fn build_blackbox_config(&self) -> BlackboxConfig {
         let output_dir = if self.blackbox.settings.output_dir.is_empty() {
             let base = if self.recording_path.is_empty() {
-                std::env::var("USERPROFILE")
-                    .map(|p| format!("{}\\Videos", p))
-                    .unwrap_or_else(|_| "C:\\Users\\Videos".to_string())
+                super::default_videos_dir()
             } else {
                 self.recording_path.clone()
             };

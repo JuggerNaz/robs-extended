@@ -2,6 +2,8 @@
 
 A complete rewrite of OBS Studio in Rust, designed for modern streaming workflows with multi-destination streaming, unified chat aggregation, and a dockable interface.
 
+ROBS is **cross-platform**: Windows is the fully-featured reference platform, macOS builds and runs with camera/mic capture and full encoding/streaming support, and Linux builds with PulseAudio audio-input placeholders.
+
 ## Features
 
 ### Core Streaming
@@ -26,6 +28,11 @@ A complete rewrite of OBS Studio in Rust, designed for modern streaming workflow
 - **YouTube Live Chat** support
 - **Unified message display** with platform-specific color coding
 - **Per-platform filtering** to view chat from specific sources
+
+### Resilience & Telemetry
+- **Blackbox dual recording** - an always-on background encode of the active scene, so footage is never lost to an unpressed Record button; crash-safe Matroska segments with `.part` marker recovery
+- **Anomaly clip capture** - rolling pre-roll buffer that saves short clips on demand
+- **PDF event-log reports** exportable from the UI
 
 ### Profiles & Settings
 - **Profile system** with save/load/duplicate functionality
@@ -52,86 +59,110 @@ ROBS is organized as a Rust workspace with modular crates:
 | `robs-chat` | Multi-platform chat aggregation (Twitch, YouTube) |
 | `robs` | Main application binary |
 
+## Platform Support
+
+| Capability | Windows | macOS | Linux |
+|-----------|---------|-------|-------|
+| Monitor / window capture | ✅ DXGI + gdigrab | ❌ planned (ScreenCaptureKit) | ❌ planned (PipeWire) |
+| Webcam capture | ✅ DirectShow | ✅ AVFoundation | ❓ untested (v4l2) |
+| Audio capture (mic + system) | ✅ DirectShow | ✅ AVFoundation | ❓ pulse placeholder |
+| Recording / encoding (x264, NVENC) | ✅ | ✅ libx264 (NVENC auto-detects unavailable) | ✅ |
+| RTMP streaming | ✅ | ✅ | ✅ |
+| Blackbox / anomaly / snapshots | ✅ | ✅ | ✅ |
+
 ## Building
 
 ### Prerequisites
 
-- Rust 1.75+ with the MSVC toolchain (`stable-x86_64-pc-windows-msvc`)
-- Windows 10 or later
-- FFmpeg 6+ must be installed and available in your system PATH
+- Rust 1.75+ via rustup (`stable` — the workspace `rust-toolchain.toml` handles the toolchain; the Windows MSVC target is declared in `targets`)
+- FFmpeg 6+ available on your `PATH` (the capture and encoding pipelines shell out to the `ffmpeg` command)
 
 ### FFmpeg Requirement
 
-ROBS requires a recent version of FFmpeg to be installed on your system. The encoding pipeline (x264, NVENC, AAC) depends on FFmpeg being available as a system command. Ensure `ffmpeg` is accessible from your command line before running ROBS.
+ROBS requires a recent version of FFmpeg to be installed on your system. The capture and encoding pipelines depend on FFmpeg being available as a system command. Ensure `ffmpeg` is accessible from your command line before running ROBS.
 
 ### Setup
 
-Install the MSVC toolchain:
+Windows (MSVC toolchain):
 
 ```powershell
 rustup toolchain install stable-x86_64-pc-windows-msvc
 rustup default stable-x86_64-pc-windows-msvc
 ```
 
+macOS (Homebrew):
+
+```bash
+brew install ffmpeg
+```
+
+Linux (Debian/Ubuntu):
+
+```bash
+sudo apt install ffmpeg
+```
+
 ### Build
 
-```powershell
+```bash
 cargo build --release
 ```
 
-The compiled binary will be at `target\x86_64-pc-windows-msvc\release\robs.exe`.
+On Windows the compiled binary will be at `target\x86_64-pc-windows-msvc\release\robs.exe`; on macOS/Linux at `target/release/robs`.
 
 ### Run
 
-```powershell
+```bash
 cargo run
 ```
 
 ## Current Status
 
-This is an early-stage project with a functional UI and core architecture in place. The following major components are implemented:
+This is a functional project with a working UI, capture, encoding, streaming, and recording pipeline on Windows. The following major components are implemented:
 
 - ✅ Complete UI with all panels (Sources, Scenes, Preview, Audio Mixer, Chat, Stats, Settings)
-- ✅ Settings window with proper resizing and close behavior
-- ✅ Recording path selector with file dialog and format selection
-- ✅ Profile management system with TOML serialization
-- ✅ Chat aggregation framework (simulated messages)
+- ✅ Multi-destination RTMP streaming with automatic reconnection
+- ✅ Recording start/stop with timestamped filenames (MP4, MKV, FLV, MOV)
 - ✅ FFmpeg H.264 software encoder with full preset support
-- ✅ NVIDIA NVENC hardware encoder with auto-detection  
+- ✅ NVIDIA NVENC hardware encoder with auto-detection
 - ✅ AAC audio encoder with bitrate control
 - ✅ Encoder factory with availability detection (FFmpeg, NVENC, AAC)
-- ✅ Multi-destination streaming architecture
-- ✅ Audio mixer with per-channel volume, mute, and meters
+- ✅ Capture sources: monitor/window (DXGI + gdigrab), webcam, test pattern
+- ✅ Audio capture (DirectShow system audio + mic) and audio mixer with meters
+- ✅ Blackbox always-on dual recording with crash recovery
+- ✅ Anomaly clip capture with rolling pre-roll
+- ✅ Profile management system with TOML serialization
+- ✅ Chat aggregation framework
 - ✅ Plugin loading architecture
-- ✅ Recording start/stop with timestamped filenames
+
+### Platform Notes
+
+- **Windows** is the primary development target; everything above works.
+- **macOS** builds and runs since the cross-platform refactor: webcam/mic capture (AVFoundation), recording, streaming, blackbox/anomaly, and snapshots all work. Monitor/window capture is gated off until a native ScreenCaptureKit backend lands — those source types report a clear error in the UI. NVENC auto-detects as unavailable, so encoding falls back to libx264. FFmpeg ≥ 8 is expected (device enumeration matches its AVFoundation listing format).
+- **Linux** compiles with a PulseAudio audio-input placeholder; not yet tested.
 
 ### Not Yet Implemented (High Priority)
 
-1. **RTMP protocol implementation** - streaming currently stubbed
-2. **Video capture sources** - window, monitor, game capture
-3. **Audio capture** - WASAPI/device input
-4. **FFmpeg encoding pipeline integration** for actual recording output
-5. **Network streaming** - actual RTMP handshake and packet transmission
-6. **Preview rendering** - live video display
-7. **Scene composition** - source layout and blending
+1. **macOS screen/window capture** - ScreenCaptureKit backend to replace the gated DXGI/gdigrab paths
+2. **Linux capture backends** - PipeWire (screen) and v4l2 (webcam) validation
+3. **Game capture** - process-specific hooking
 
 ### Technical Status
 
-The project successfully builds and runs with:
-- MSVC toolchain support (Windows target)
-- FFmpeg dependency detection on startup  
-- NVENC hardware acceleration detection
-- AAC audio encoding availability
-- All UI controls functional except actual media capture/streaming
-
-The codebase provides a solid foundation with proper architecture, modular crates, and trait-based extensibility. The remaining work focuses on integrating actual media capture and streaming capabilities.
+The project builds and runs with:
+- Windows (MSVC) as the fully-featured target
+- macOS (aarch64-apple-darwin) build + test suite passing
+- Cross-platform workspace configuration (`rust-toolchain.toml`, `.cargo/config.toml` are platform-neutral; Windows-only flags are scoped to the Windows target)
+- FFmpeg dependency detection on startup
+- NVENC hardware acceleration detection with graceful fallback
+- `cargo test -p robs-ui -p robs-outputs` test suite (54 tests) passing on Windows and macOS
 
 ## Design Goals
 
 - **Memory safety** through Rust's ownership system
 - **Concurrency** with async/await and lock-free data structures where possible
 - **Extensibility** through trait-based plugin architecture
-- **Cross-platform** potential (currently Windows-focused)
+- **Cross-platform** by construction - platform code is isolated behind `#[cfg]` gates with per-platform FFmpeg input backends
 - **Performance** with LTO and optimized release builds
 
 ## License

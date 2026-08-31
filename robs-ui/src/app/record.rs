@@ -44,9 +44,7 @@ impl RobsApp {
         let _ = std::io::stderr().write_all(b"[Recording] start_recording() called\n");
 
         let path = if self.recording_path.is_empty() {
-            let default_dir = std::env::var("USERPROFILE")
-                .map(|p| format!("{}\\Videos", p))
-                .unwrap_or_else(|_| "C:\\Users\\Videos".to_string());
+            let default_dir = super::default_videos_dir();
             fs::create_dir_all(&default_dir).ok();
             default_dir
         } else {
@@ -154,6 +152,11 @@ impl RobsApp {
             input_spec, offset_x, offset_y, video_width, video_height
         );
 
+        // input_spec is only consumed by the Windows-only gdigrab branch
+        // below; keep non-Windows builds warning-free.
+        #[cfg(not(windows))]
+        let _ = (input_spec, final_width, final_height);
+
         let output_path = self.record.last_recording_path.clone();
 
         // Determine which encoder to use
@@ -194,26 +197,39 @@ impl RobsApp {
             ffmpeg_args.push("-i".into());
             ffmpeg_args.push("pipe:0".into());
         } else {
-            // Window capture fallback: use gdigrab
-            ffmpeg_args.push("-f".into());
-            ffmpeg_args.push("gdigrab".into());
-            ffmpeg_args.push("-framerate".into());
-            ffmpeg_args.push(self.fps_setting.to_string());
-            ffmpeg_args.push("-draw_mouse".into());
-            ffmpeg_args.push("1".into());
+            #[cfg(windows)]
+            {
+                // Window capture fallback: use gdigrab (Windows-only format)
+                ffmpeg_args.push("-f".into());
+                ffmpeg_args.push("gdigrab".into());
+                ffmpeg_args.push("-framerate".into());
+                ffmpeg_args.push(self.fps_setting.to_string());
+                ffmpeg_args.push("-draw_mouse".into());
+                ffmpeg_args.push("1".into());
 
-            if use_window_capture {
-                ffmpeg_args.push("-i".into());
-                ffmpeg_args.push(input_spec.clone());
-            } else {
-                ffmpeg_args.push("-offset_x".into());
-                ffmpeg_args.push(offset_x.to_string());
-                ffmpeg_args.push("-offset_y".into());
-                ffmpeg_args.push(offset_y.to_string());
-                ffmpeg_args.push("-video_size".into());
-                ffmpeg_args.push(format!("{}x{}", final_width, final_height));
-                ffmpeg_args.push("-i".into());
-                ffmpeg_args.push(input_spec.clone());
+                if use_window_capture {
+                    ffmpeg_args.push("-i".into());
+                    ffmpeg_args.push(input_spec.clone());
+                } else {
+                    ffmpeg_args.push("-offset_x".into());
+                    ffmpeg_args.push(offset_x.to_string());
+                    ffmpeg_args.push("-offset_y".into());
+                    ffmpeg_args.push(offset_y.to_string());
+                    ffmpeg_args.push("-video_size".into());
+                    ffmpeg_args.push(format!("{}x{}", final_width, final_height));
+                    ffmpeg_args.push("-i".into());
+                    ffmpeg_args.push(input_spec.clone());
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                // gdigrab is a Windows-only input format; window-capture
+                // recording needs a native backend on this platform.
+                self.log_event(
+                    "Window-capture recording is not supported on this platform yet",
+                    EventLogKind::Record,
+                );
+                return;
             }
         }
 
@@ -466,9 +482,21 @@ impl RobsApp {
                     Ok(None) => {
                         if start.elapsed() > timeout {
                             eprintln!("[Recording] FFmpeg timeout, forcing kill...");
-                            let _ = std::process::Command::new("taskkill")
-                                .args(["/IM", "ffmpeg.exe", "/F"])
-                                .output();
+                            #[cfg(windows)]
+                            {
+                                // Broad sweep: also catches orphaned ffmpeg
+                                // children from crashed sessions.
+                                let _ = std::process::Command::new("taskkill")
+                                    .args(["/IM", "ffmpeg.exe", "/F"])
+                                    .output();
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                // taskkill is Windows-only; kill just this
+                                // child (never unrelated ffmpeg processes).
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(200));

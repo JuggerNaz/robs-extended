@@ -491,9 +491,7 @@ impl RobsApp {
                 .unwrap_or_else(|| std::path::PathBuf::from("Snapshots"));
             (rec_dir.to_string_lossy().into_owned(), rec_stem)
         } else {
-            let fallback = std::env::var("USERPROFILE")
-                .map(|p| format!("{}\\Videos\\Snapshots", p))
-                .unwrap_or_else(|_| "Snapshots".to_string());
+            let fallback = format!("{}/Snapshots", default_videos_dir());
             (fallback, "ROBS_Snapshot".to_string())
         };
 
@@ -572,5 +570,31 @@ impl eframe::App for RobsApp {
         if self.show_settings {
             self.show_settings_window(ctx);
         }
+    }
+}
+
+/// User home directory, portable across platforms
+/// (`%USERPROFILE%` on Windows, `$HOME` elsewhere). `None` when neither is set.
+pub(crate) fn user_home() -> Option<String> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+}
+
+/// Default base folder for recordings, snapshots, and engine output:
+/// `<home>/Videos` on Windows/Linux, `<home>/Movies` on macOS.
+pub(crate) fn default_videos_dir() -> String {
+    match user_home() {
+        Some(home) => {
+            #[cfg(target_os = "macos")]
+            let folder = "Movies";
+            #[cfg(not(target_os = "macos"))]
+            let folder = "Videos";
+            std::path::Path::new(&home)
+                .join(folder)
+                .to_string_lossy()
+                .into_owned()
+        }
+        None => "Videos".to_string(),
     }
 }

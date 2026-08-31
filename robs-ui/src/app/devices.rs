@@ -170,6 +170,51 @@ pub(crate) fn get_audio_devices() -> Vec<AudioDeviceInfo> {
         });
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        // List AVFoundation microphones alongside the Default entry.
+        if let Ok(output) = Command::new("ffmpeg")
+            .args(["-list_devices", "true", "-f", "avfoundation", "-i", "dummy"])
+            .stderr(std::process::Stdio::piped())
+            .output()
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let mut in_audio_section = false;
+
+            for line in stderr.lines() {
+                if line.contains("audio devices") {
+                    in_audio_section = true;
+                    continue;
+                }
+
+                if line.contains("video devices") {
+                    in_audio_section = false;
+                }
+
+                if !in_audio_section {
+                    continue;
+                }
+
+                // FFmpeg >= 8 format: `[AVFoundation indev @ ...] [0] Device Name`
+                let payload = line.rsplit_once("] ").map(|(_, rest)| rest).unwrap_or(line);
+                if let Some(rest) = payload.strip_prefix('[') {
+                    if let Some((_, name)) = rest.split_once(']') {
+                        let name = name.trim();
+                        if !name.is_empty() {
+                            devices.push(AudioDeviceInfo {
+                                name: name.to_string(),
+                                id: name.to_string(),
+                                is_input: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     devices
 }
 
@@ -199,6 +244,54 @@ pub(crate) fn get_video_devices() -> Vec<String> {
                                 devices.push(name.to_string());
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        // List AVFoundation cameras; ffmpeg writes the device list to stderr.
+        if let Ok(output) = Command::new("ffmpeg")
+            .args(["-list_devices", "true", "-f", "avfoundation", "-i", "dummy"])
+            .stderr(std::process::Stdio::piped())
+            .output()
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let mut in_video_section = false;
+
+            for line in stderr.lines() {
+                if line.contains("video devices") {
+                    in_video_section = true;
+                    continue;
+                }
+
+                if line.contains("audio devices") {
+                    in_video_section = false;
+                }
+
+                if !in_video_section {
+                    continue;
+                }
+
+                // Drop the `[AVFoundation indev @ ...] ` prefix if present.
+                let payload = line.rsplit_once("] ").map(|(_, rest)| rest).unwrap_or(line);
+
+                // FFmpeg >= 8: `[0] Device Name`; older: `"Device Name" (video)`
+                let name = if let Some(rest) = payload.strip_prefix('[') {
+                    rest.split_once(']').map(|(_, name)| name.trim())
+                } else if payload.starts_with('"') {
+                    payload[1..].find('"').map(|end| &payload[1..1 + end])
+                } else {
+                    None
+                };
+
+                if let Some(name) = name {
+                    if !name.is_empty() {
+                        devices.push(name.to_string());
                     }
                 }
             }

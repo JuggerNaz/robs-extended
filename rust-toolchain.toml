@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable-x86_64-pc-windows-msvc"
+# Host-default stable toolchain so the workspace builds on any OS.
+# Windows developers still get the MSVC target installed for cross-checks.
+channel = "stable"
 targets = ["x86_64-pc-windows-msvc"]

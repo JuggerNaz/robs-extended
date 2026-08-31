@@ -3,6 +3,7 @@ use robs_core::*;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::any::Any;
+#[cfg(windows)]
 use std::process::{Command, Stdio};
 
 /// Monitor capture source using FFmpeg gdigrab
@@ -40,29 +41,39 @@ impl MonitorCaptureSource {
     }
 
     fn start_capture(&mut self) -> Result<()> {
-        let input = format!("desktop",);
+        #[cfg(windows)]
+        {
+            let input = "desktop".to_string();
 
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args([
-            "-f", "gdigrab",
-            "-framerate", "30",
-            "-draw_mouse", "1",
-            "-i", &input,
-            "-f", "rawvideo",
-            "-pix_fmt", "bgra",
-            "-",
-        ]);
+            let mut cmd = Command::new("ffmpeg");
+            cmd.args([
+                "-f", "gdigrab",
+                "-framerate", "30",
+                "-draw_mouse", "1",
+                "-i", &input,
+                "-f", "rawvideo",
+                "-pix_fmt", "bgra",
+                "-",
+            ]);
 
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::null());
 
-        let child = cmd.spawn()?;
-        self.ffmpeg_process = Some(child);
-        self.frame_count = 0;
+            let child = cmd.spawn()?;
+            self.ffmpeg_process = Some(child);
+            self.frame_count = 0;
 
-        println!("[MonitorCapture] Started FFmpeg gdigrab for monitor {}", self.monitor_index);
-        Ok(())
+            println!("[MonitorCapture] Started FFmpeg gdigrab for monitor {}", self.monitor_index);
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            anyhow::bail!(
+                "gdigrab capture is Windows-only; screen capture on this platform \
+                 needs a native backend (not implemented yet)"
+            );
+        }
     }
 
     fn stop_capture(&mut self) {
@@ -211,30 +222,40 @@ impl WindowCaptureSource {
     }
 
     fn start_capture(&mut self) -> Result<()> {
-        let input = format!("title={}", self.window_title);
+        #[cfg(windows)]
+        {
+            let input = format!("title={}", self.window_title);
 
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args([
-            "-f", "gdigrab",
-            "-framerate", "30",
-            "-offset_x", "0",
-            "-offset_y", "0",
-            "-i", &input,
-            "-f", "rawvideo",
-            "-pix_fmt", "bgra",
-            "-",
-        ]);
+            let mut cmd = Command::new("ffmpeg");
+            cmd.args([
+                "-f", "gdigrab",
+                "-framerate", "30",
+                "-offset_x", "0",
+                "-offset_y", "0",
+                "-i", &input,
+                "-f", "rawvideo",
+                "-pix_fmt", "bgra",
+                "-",
+            ]);
 
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::null());
 
-        let child = cmd.spawn()?;
-        self.ffmpeg_process = Some(child);
-        self.frame_count = 0;
+            let child = cmd.spawn()?;
+            self.ffmpeg_process = Some(child);
+            self.frame_count = 0;
 
-        println!("[WindowCapture] Started FFmpeg gdigrab for window: {}", self.window_title);
-        Ok(())
+            println!("[WindowCapture] Started FFmpeg gdigrab for window: {}", self.window_title);
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            anyhow::bail!(
+                "gdigrab window capture is Windows-only; window capture on this \
+                 platform needs a native backend (not implemented yet)"
+            );
+        }
     }
 
     fn stop_capture(&mut self) {

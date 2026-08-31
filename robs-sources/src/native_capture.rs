@@ -1,19 +1,17 @@
-//! Native Windows capture using Win32 Window enumeration and GetWindowDC/BitBlt
-//! 
-//! This module provides screen capture using Windows APIs:
-//! - Win32 EnumWindows for enumerating open windows
-//! - GDI BitBlt for capturing window content
+//! Native capture helpers.
+//!
+//! Window enumeration/capture uses Win32 (`EnumWindows`, `PrintWindow`, GDI
+//! `BitBlt`) and is only compiled on Windows; other platforms get honest
+//! stubs (empty enumeration / `None` captures) until native backends are
+//! added (ScreenCaptureKit on macOS, X11 on Linux). Webcam capture goes
+//! through an FFmpeg subprocess and works on every platform via the OS
+//! input format (dshow / avfoundation / v4l2).
 
 use anyhow::Result;
 use async_trait::async_trait;
 use robs_core::traits::*;
 use robs_core::*;
 use std::any::Any;
-use std::sync::Mutex;
-use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
-use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Window info for enumeration
 #[derive(Clone, Debug)]
@@ -23,22 +21,32 @@ pub struct WindowInfo {
     pub process_id: u32,
 }
 
-// Global storage for window enumeration
-static ENUM_WINDOWS: Mutex<Vec<WindowInfo>> = Mutex::new(Vec::new());
+// ---------------------------------------------------------------------------
+// Window enumeration + single-frame window capture (Windows: Win32/GDI,
+// other platforms: stubs).
+// ---------------------------------------------------------------------------
 
-/// Get list of open windows using Win32 EnumWindows
+// Global storage for window enumeration
+#[cfg(windows)]
+static ENUM_WINDOWS: std::sync::Mutex<Vec<WindowInfo>> = std::sync::Mutex::new(Vec::new());
+
+/// Get list of open windows using Win32 EnumWindows.
+#[cfg(windows)]
 pub fn get_open_windows() -> Vec<WindowInfo> {
+    use windows::Win32::Foundation::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
     // Clear the global storage
     {
         let mut windows = ENUM_WINDOWS.lock().unwrap();
         windows.clear();
     }
-    
+
     unsafe {
         // Use EnumWindows with a static callback
         let _ = EnumWindows(Some(enum_windows_callback), LPARAM(0));
     }
-    
+
     // Get the collected windows
     let mut windows = ENUM_WINDOWS.lock().unwrap();
     let result = windows.clone();
@@ -46,30 +54,44 @@ pub fn get_open_windows() -> Vec<WindowInfo> {
     result
 }
 
+/// Non-Windows stub: native window enumeration is not implemented yet.
+/// The UI renders an empty list ("No windows found") on these platforms.
+#[cfg(not(windows))]
+pub fn get_open_windows() -> Vec<WindowInfo> {
+    Vec::new()
+}
+
 // Callback function for EnumWindows (must be a function, not a closure)
-unsafe extern "system" fn enum_windows_callback(hwnd: HWND, _: LPARAM) -> BOOL {
+#[cfg(windows)]
+unsafe extern "system" fn enum_windows_callback(
+    hwnd: windows::Win32::Foundation::HWND,
+    _: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::BOOL {
+    use windows::Win32::Foundation::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
     // Check if window is visible
     let is_visible: BOOL = IsWindowVisible(hwnd);
     if is_visible.0 == 0 {
         return BOOL(1); // Continue enumeration
     }
-    
+
     // Get window title
     let mut title_buf = [0u16; 512];
     let len = GetWindowTextW(hwnd, &mut title_buf);
     if len == 0 {
         return BOOL(1); // Continue
     }
-    
+
     let title = String::from_utf16_lossy(&title_buf[..len as usize]);
     if title.is_empty() {
         return BOOL(1); // Continue
     }
-    
+
     // Get process ID
     let mut process_id: u32 = 0;
     GetWindowThreadProcessId(hwnd, Some(&mut process_id));
-    
+
     // Skip some system windows
     if title.starts_with("Windows ")
         || title.starts_with("Program Manager")
@@ -77,7 +99,7 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, _: LPARAM) -> BOOL {
     {
         return BOOL(1); // Continue
     }
-    
+
     // Add to global storage
     if let Ok(mut windows) = ENUM_WINDOWS.lock() {
         windows.push(WindowInfo {
@@ -86,18 +108,23 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, _: LPARAM) -> BOOL {
             process_id,
         });
     }
-    
+
     BOOL(1) // Continue enumeration
 }
 
 /// Capture a single frame from a window by HWND.
 ///
-/// Uses `PrintWindow` with `PW_RENDERFULLCONTENT` first (captures
+/// Windows: uses `PrintWindow` with `PW_RENDERFULLCONTENT` first (captures
 /// hardware-accelerated / DirectX content), then falls back to `BitBlt`
 /// from the window DC for older renderers.
 ///
 /// Returns `(bgra_data, width, height)` or `None` on failure.
+#[cfg(windows)]
 pub fn capture_window(hwnd: isize) -> Option<(Vec<u8>, u32, u32)> {
+    use windows::Win32::Foundation::*;
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+
     unsafe {
         let hwnd = HWND(hwnd as *mut std::ffi::c_void);
 
@@ -189,6 +216,13 @@ pub fn capture_window(hwnd: isize) -> Option<(Vec<u8>, u32, u32)> {
     }
 }
 
+/// Non-Windows stub: native window capture is not implemented yet.
+/// Window-capture sources on these platforms simply produce no frames.
+#[cfg(not(windows))]
+pub fn capture_window(_hwnd: isize) -> Option<(Vec<u8>, u32, u32)> {
+    None
+}
+
 /// Window capture source using window handle
 pub struct WindowCaptureSource {
     id: SourceId,
@@ -218,8 +252,8 @@ impl WindowCaptureSource {
             frame_count: 0,
         }
     }
-    
-    /// Capture a frame from the window using GDI
+
+    /// Capture a frame from the window
     fn capture_frame(&mut self) -> Result<VideoFrame> {
         match capture_window(self.hwnd) {
             Some((buffer, width, height)) => {
@@ -253,30 +287,30 @@ impl Source for WindowCaptureSource {
     fn get_audio_info(&self) -> Option<AudioInfo> { None }
     fn as_any(&self) -> &dyn Any { self }
     fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    
+
     async fn activate(&mut self) -> Result<()> {
         self.active = true;
         self.frame_count = 0;
         println!("[WindowCapture] Activated window: {}", self.name);
         Ok(())
     }
-    
+
     async fn deactivate(&mut self) -> Result<()> {
         self.active = false;
         println!("[WindowCapture] Deactivated window: {}", self.name);
         Ok(())
     }
-    
+
     fn is_active(&self) -> bool { self.active }
-    
+
     fn properties_definition(&self) -> Vec<PropertyDef> {
         vec![]
     }
-    
+
     fn get_property(&self, _name: &str) -> Option<PropertyValue> {
         None
     }
-    
+
     fn set_property(&mut self, _name: &str, _value: PropertyValue) -> Result<()> {
         Ok(())
     }
@@ -288,7 +322,7 @@ impl VideoSource for WindowCaptureSource {
         if !self.active {
             return Ok(None);
         }
-        
+
         match self.capture_frame() {
             Ok(frame) => Ok(Some(frame)),
             Err(e) => {
@@ -300,10 +334,56 @@ impl VideoSource for WindowCaptureSource {
 }
 
 // ---------------------------------------------------------------------------
-// Webcam capture via FFmpeg DirectShow (dshow)
+// Webcam capture via FFmpeg (all platforms).
 // ---------------------------------------------------------------------------
 
-/// Manages an FFmpeg process that captures from a DirectShow webcam device
+/// FFmpeg args selecting the platform's camera as FFmpeg input: everything
+/// from the input format up to and including `-i <spec>`. Returns `None`
+/// when the platform has no supported camera backend.
+///
+/// Windows uses DirectShow (`video=NAME`), macOS uses AVFoundation (device
+/// name or index), Linux uses V4L2 (device path). The raw BGRA output side
+/// is appended by the caller and is platform-independent.
+fn webcam_input_args(device_name: &str, width: u32, height: u32, fps: f32) -> Option<Vec<String>> {
+    let mut args: Vec<String> = Vec::new();
+
+    #[cfg(windows)]
+    args.push("-f".into());
+    #[cfg(windows)]
+    args.push("dshow".into());
+
+    #[cfg(target_os = "macos")]
+    args.push("-f".into());
+    #[cfg(target_os = "macos")]
+    args.push("avfoundation".into());
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    args.push("-f".into());
+    #[cfg(all(unix, not(target_os = "macos")))]
+    args.push("v4l2".into());
+
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (device_name, width, height, fps);
+        return None; // no camera backend for this platform
+    }
+
+    args.push("-video_size".into());
+    args.push(format!("{}x{}", width, height));
+    args.push("-framerate".into());
+    args.push(fps.to_string());
+    args.push("-i".into());
+    // dshow wants `video=NAME`; avfoundation/v4l2 take the device
+    // name/index/path exactly as reported by the device listing.
+    #[cfg(windows)]
+    args.push(format!("video={}", device_name));
+    #[cfg(not(windows))]
+    args.push(device_name.to_string());
+
+    Some(args)
+}
+
+/// Manages an FFmpeg process that captures from a camera device
 /// and continuously reads raw BGRA frames on a background thread.
 pub struct WebcamCapture {
     child: Option<std::process::Child>,
@@ -316,17 +396,18 @@ pub struct WebcamCapture {
 
 impl WebcamCapture {
     /// Spawn FFmpeg to capture from `device_name` at the given resolution/fps.
-    /// Returns `None` if FFmpeg fails to start.
+    /// Returns `None` if FFmpeg fails to start or the platform has no backend.
     pub fn new(device_name: &str, width: u32, height: u32, fps: f32) -> Option<Self> {
         use std::io::Read;
         use std::process::{Command, Stdio};
 
+        let Some(input_args) = webcam_input_args(device_name, width, height, fps) else {
+            return None;
+        };
+
         let mut child = Command::new("ffmpeg")
+            .args(&input_args)
             .args([
-                "-f", "dshow",
-                "-video_size", &format!("{}x{}", width, height),
-                "-framerate", &fps.to_string(),
-                "-i", &format!("video={}", device_name),
                 "-f", "rawvideo",
                 "-pix_fmt", "bgra",
                 "pipe:1",

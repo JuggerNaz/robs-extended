@@ -6,6 +6,74 @@ use std::any::Any;
 use std::process::{Command, Stdio};
 use std::io::Read;
 
+/// FFmpeg input format for audio capture on the current platform
+/// (DirectShow on Windows, AVFoundation on macOS, PulseAudio on Linux).
+fn audio_input_format() -> &'static str {
+    #[cfg(windows)]
+    {
+        "dshow"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "avfoundation"
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "pulse"
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        "dshow"
+    }
+}
+
+/// Build the FFmpeg `-i` input specifier for an audio device on the current
+/// platform. `device` is the app-level device id; on Windows those are
+/// `audio=<name>` DirectShow specs, on macOS AVFoundation names/indices.
+/// `mic` only affects the Windows empty-id fallback (mic vs desktop loopback).
+fn audio_input_spec(device: &str, mic: bool) -> String {
+    let _ = mic;
+    #[cfg(windows)]
+    {
+        if device.is_empty() {
+            if mic {
+                "audio=0".to_string()
+            } else {
+                "audio=virtual-audio-capturer".to_string()
+            }
+        } else if device.starts_with("audio=") {
+            device.to_string()
+        } else {
+            format!("audio={}", device)
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // avfoundation takes a device name or index; `:<index>` selects an
+        // audio-only input. Strip Windows-style `audio=` prefixes from
+        // persisted settings.
+        let name = device.strip_prefix("audio=").unwrap_or(device);
+        if name.is_empty() || name == "default" || name == "disabled" {
+            ":0".to_string()
+        } else {
+            name.to_string()
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let name = device.strip_prefix("audio=").unwrap_or(device);
+        if name.is_empty() || name == "default" || name == "disabled" {
+            "default".to_string()
+        } else {
+            name.to_string()
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        device.to_string()
+    }
+}
+
 /// System audio capture using FFmpeg dsound (DirectSound) or wasapi
 pub struct SystemAudioSource {
     id: SourceId,
@@ -33,15 +101,11 @@ impl SystemAudioSource {
     }
 
     fn start_capture(&mut self) -> Result<()> {
-        let device = if self.device_id.is_empty() {
-            "audio=virtual-audio-capturer".to_string()
-        } else {
-            format!("audio={}", self.device_id)
-        };
+        let device = audio_input_spec(&self.device_id, false);
 
         let mut cmd = Command::new("ffmpeg");
         cmd.args([
-            "-f", "dshow",
+            "-f", audio_input_format(),
             "-i", &device,
             "-f", "s16le",
             "-ar", "48000",
@@ -184,15 +248,11 @@ impl MicrophoneSource {
     }
 
     fn start_capture(&mut self) -> Result<()> {
-        let input = if self.device_name.is_empty() {
-            "audio=0".to_string()
-        } else {
-            format!("audio={}", self.device_name)
-        };
+        let input = audio_input_spec(&self.device_name, true);
 
         let mut cmd = Command::new("ffmpeg");
         cmd.args([
-            "-f", "dshow",
+            "-f", audio_input_format(),
             "-i", &input,
             "-f", "s16le",
             "-ar", "48000",
@@ -311,9 +371,9 @@ impl AudioSource for MicrophoneSource {
 pub fn list_audio_devices() -> Vec<(String, String)> {
     let mut devices = Vec::new();
 
-    // Try to get DirectShow audio devices
+    // List audio devices via the platform's FFmpeg input format
     if let Ok(output) = Command::new("ffmpeg")
-        .args(["-list_devices", "true", "-f", "dshow", "-i", ""])
+        .args(["-list_devices", "true", "-f", audio_input_format(), "-i", ""])
         .stderr(std::process::Stdio::piped())
         .output()
     {
@@ -329,6 +389,39 @@ pub fn list_audio_devices() -> Vec<(String, String)> {
                     if let Some(end) = line[start+1..].find("\"") {
                         let name = &line[start+1..start+1+end];
                         if !name.contains("Device") && !name.is_empty() {
+                            devices.push((name.to_string(), name.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // FFmpeg >= 8 avfoundation lists unquoted devices:
+            // `[AVFoundation indev @ ...] [0] Device Name`
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let mut in_audio_section = false;
+
+            for line in stderr.lines() {
+                if line.contains("audio devices") {
+                    in_audio_section = true;
+                    continue;
+                }
+
+                if line.contains("video devices") {
+                    in_audio_section = false;
+                }
+
+                if !in_audio_section {
+                    continue;
+                }
+
+                let payload = line.rsplit_once("] ").map(|(_, rest)| rest).unwrap_or(line);
+                if let Some(rest) = payload.strip_prefix('[') {
+                    if let Some((_, name)) = rest.split_once(']') {
+                        let name = name.trim();
+                        if !name.is_empty() {
                             devices.push((name.to_string(), name.to_string()));
                         }
                     }
