@@ -1,5 +1,7 @@
-[build]
-target = "x86_64-pc-windows-msvc"
+# The build target is NOT pinned here so every platform builds for its host.
+# Windows-only flags (static CRT) are scoped to the MSVC target.
+
+[target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 
 [term]

@@ -56,13 +56,12 @@ impl RobsApp {
 
     /// Project the user's anomaly settings (+ active output dims/fps) into the
     /// runtime config. An empty `output_dir` resolves to an `Anomaly/` subfolder
-    /// of the recording path (or `%USERPROFILE%\Videos` when none is set).
+    /// of the recording path (or the home `Videos`/`Movies` folder when none
+    /// is set).
     fn build_anomaly_config(&self) -> AnomalyConfig {
         let output_dir = if self.anomaly.settings.output_dir.is_empty() {
             let base = if self.recording_path.is_empty() {
-                std::env::var("USERPROFILE")
-                    .map(|p| format!("{}\\Videos", p))
-                    .unwrap_or_else(|_| "C:\\Users\\Videos".to_string())
+                super::default_videos_dir()
             } else {
                 self.recording_path.clone()
             };

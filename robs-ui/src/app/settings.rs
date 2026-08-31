@@ -384,10 +384,7 @@ impl RobsApp {
                 ui.label(display_path);
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .set_directory(
-                            std::env::var("USERPROFILE")
-                                .unwrap_or_else(|_| "C:\\Users".to_string()),
-                        )
+                        .set_directory(super::user_home().unwrap_or_default())
                         .pick_folder()
                     {
                     self.recording_path = path.to_string_lossy().into_owned();
@@ -446,10 +443,7 @@ impl RobsApp {
                 ui.label(display);
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .set_directory(
-                            std::env::var("USERPROFILE")
-                                .unwrap_or_else(|_| "C:\\Users".to_string()),
-                        )
+                        .set_directory(super::user_home().unwrap_or_default())
                         .pick_folder()
                     {
                         self.blackbox.settings.output_dir =
@@ -608,10 +602,7 @@ impl RobsApp {
                 ui.label(display);
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .set_directory(
-                            std::env::var("USERPROFILE")
-                                .unwrap_or_else(|_| "C:\\Users".to_string()),
-                        )
+                        .set_directory(super::user_home().unwrap_or_default())
                         .pick_folder()
                     {
                         self.anomaly.settings.output_dir =

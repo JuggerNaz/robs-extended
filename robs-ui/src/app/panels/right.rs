@@ -345,7 +345,7 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
             "robs_event_log_{}.pdf",
             chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
         );
-        let start_dir = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users".to_string());
+        let start_dir = super::super::user_home().unwrap_or_default();
         let Some(path) = rfd::FileDialog::new()
             .set_directory(start_dir)
             .set_file_name(default_name)

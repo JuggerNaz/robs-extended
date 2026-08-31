@@ -33,12 +33,22 @@ struct TestDir(PathBuf);
 
 impl TestDir {
     fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Nanos alone are not unique on macOS (~microsecond clock granularity):
+        // parallel tests starting in the same tick collide, and the first twin's
+        // Drop deletes the dir out from under the second. A per-process counter
+        // makes the name collision-proof.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let mut p = std::env::temp_dir();
-        p.push(format!("robs-anomaly-test-{}-{nanos}", std::process::id()));
+        p.push(format!(
+            "robs-anomaly-test-{}-{seq}-{nanos}",
+            std::process::id()
+        ));
         fs::create_dir_all(&p).expect("create test dir");
         Self(p)
     }
