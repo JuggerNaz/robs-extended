@@ -539,14 +539,14 @@ impl eframe::App for RobsApp {
         // Process preview frames (recording + blackbox tap hook into this).
         self.process_preview_frames(ctx);
 
-        // Encoders timestamp piped frames at a FIXED framerate, so while one
-        // is live the UI must tick at the frame interval even when idle —
-        // otherwise frames are only produced on mouse input (fast) and the
-        // 1s status repaint (slow), and the video fast-forwards through the
-        // idle stretches on playback.
-        let encoder_live = (self.record.recording && !self.record.recording_paused)
-            || (self.streaming && !self.streaming_paused);
-        if encoder_live && has_capture_source {
+        // Encoders timestamp piped frames at a FIXED framerate, and the preview
+        // must stay live while a capture source exists. egui is otherwise fully
+        // event-driven: with no repaint request, update() only runs on input
+        // events, so the preview freezes on its placeholder and the blackbox
+        // tap starves until the next mouse move. Tick at the frame interval
+        // whenever a visible capture source exists (encoder pacing keeps the
+        // video from fast-forwarding through idle stretches on playback).
+        if has_capture_source {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(
                 1.0 / self.fps_setting.max(1.0),
             ));

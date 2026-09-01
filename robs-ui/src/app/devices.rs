@@ -198,7 +198,8 @@ pub(crate) fn get_audio_devices() -> Vec<AudioDeviceInfo> {
                 }
 
                 // FFmpeg >= 8 format: `[AVFoundation indev @ ...] [0] Device Name`
-                let payload = line.rsplit_once("] ").map(|(_, rest)| rest).unwrap_or(line);
+                // split_once drops only the indev prefix, keeping `[0] Device Name`.
+                let payload = line.split_once("] ").map(|(_, rest)| rest).unwrap_or(line);
                 if let Some(rest) = payload.strip_prefix('[') {
                     if let Some((_, name)) = rest.split_once(']') {
                         let name = name.trim();
@@ -278,7 +279,8 @@ pub(crate) fn get_video_devices() -> Vec<String> {
                 }
 
                 // Drop the `[AVFoundation indev @ ...] ` prefix if present.
-                let payload = line.rsplit_once("] ").map(|(_, rest)| rest).unwrap_or(line);
+                // split_once keeps the FFmpeg >= 8 `[0] Device Name` index intact.
+                let payload = line.split_once("] ").map(|(_, rest)| rest).unwrap_or(line);
 
                 // FFmpeg >= 8: `[0] Device Name`; older: `"Device Name" (video)`
                 let name = if let Some(rest) = payload.strip_prefix('[') {
