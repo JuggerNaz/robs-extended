@@ -274,22 +274,29 @@ impl RobsApp {
             ui.add(egui::TextEdit::singleline(&mut self.stream_key).password(true));
             ui.end_row();
             ui.label("Video Encoder:");
+            // Edit a local copy: the encoder list is borrowed immutably from
+            // the controller inside the loop, which would conflict with a
+            // mutable borrow of the encoder field through the same deref.
+            let mut video_encoder = self.video_encoder.clone();
             egui::ComboBox::from_id_salt("video_encoder")
-                .selected_text(&self.video_encoder)
+                .selected_text(&video_encoder)
                 .show_ui(ui, |ui| {
                     for enc in &self.available_video_encoders {
-                        ui.selectable_value(&mut self.video_encoder, enc.clone(), enc);
+                        ui.selectable_value(&mut video_encoder, enc.clone(), enc);
                     }
                 });
+            self.video_encoder = video_encoder;
             ui.end_row();
             ui.label("Audio Encoder:");
+            let mut audio_encoder = self.audio_encoder.clone();
             egui::ComboBox::from_id_salt("audio_encoder")
-                .selected_text(&self.audio_encoder)
+                .selected_text(&audio_encoder)
                 .show_ui(ui, |ui| {
                     for enc in &self.available_audio_encoders {
-                        ui.selectable_value(&mut self.audio_encoder, enc.clone(), enc);
+                        ui.selectable_value(&mut audio_encoder, enc.clone(), enc);
                     }
                 });
+            self.audio_encoder = audio_encoder;
             ui.end_row();
             ui.label("Bitrate:");
             ui.add(egui::Slider::new(&mut self.stream_bitrate, 1000..=20000).suffix(" kbps"));
@@ -354,22 +361,29 @@ impl RobsApp {
                 });
             ui.end_row();
             ui.label("Video Encoder:");
+            // Edit a local copy (see the streaming tab note): iterating the
+            // controller's encoder list immutably conflicts with a mutable
+            // borrow of the encoder field through the same deref.
+            let mut video_encoder = self.video_encoder.clone();
             egui::ComboBox::from_id_salt("recording_encoder")
-                .selected_text(&self.video_encoder)
+                .selected_text(&video_encoder)
                 .show_ui(ui, |ui| {
                     for enc in &self.available_video_encoders {
-                        ui.selectable_value(&mut self.video_encoder, enc.clone(), enc);
+                        ui.selectable_value(&mut video_encoder, enc.clone(), enc);
                     }
                 });
+            self.video_encoder = video_encoder;
             ui.end_row();
             ui.label("Audio Encoder:");
+            let mut audio_encoder = self.audio_encoder.clone();
             egui::ComboBox::from_id_salt("audio_encoder")
-                .selected_text(&self.audio_encoder)
+                .selected_text(&audio_encoder)
                 .show_ui(ui, |ui| {
                     for enc in &self.available_audio_encoders {
-                        ui.selectable_value(&mut self.audio_encoder, enc.clone(), enc);
+                        ui.selectable_value(&mut audio_encoder, enc.clone(), enc);
                     }
                 });
+            self.audio_encoder = audio_encoder;
             ui.end_row();
             ui.label("Bitrate:");
             ui.add(egui::Slider::new(&mut self.recording_bitrate, 1000..=50000).suffix(" kbps"));
@@ -384,7 +398,7 @@ impl RobsApp {
                 ui.label(display_path);
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .set_directory(super::user_home().unwrap_or_default())
+                        .set_directory(robs_controller::user_home().unwrap_or_default())
                         .pick_folder()
                     {
                     self.recording_path = path.to_string_lossy().into_owned();
@@ -443,7 +457,7 @@ impl RobsApp {
                 ui.label(display);
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .set_directory(super::user_home().unwrap_or_default())
+                        .set_directory(robs_controller::user_home().unwrap_or_default())
                         .pick_folder()
                     {
                         self.blackbox.settings.output_dir =
@@ -602,7 +616,7 @@ impl RobsApp {
                 ui.label(display);
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .set_directory(super::user_home().unwrap_or_default())
+                        .set_directory(robs_controller::user_home().unwrap_or_default())
                         .pick_folder()
                     {
                         self.anomaly.settings.output_dir =

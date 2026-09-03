@@ -1,7 +1,7 @@
 //! Annotation / mark-up tools and on-canvas rendering. Extracted verbatim
 //! from `app.rs`.
 
-use super::state::EventLogKind;
+use robs_controller::state::EventLogKind;
 use super::RobsApp;
 use eframe::egui;
 use robs_core::scene::Position;
@@ -138,7 +138,7 @@ impl RobsApp {
         // Compute the screen-space bounding rect of an annotation (for
         // selection highlighting + hit-testing).
         let text_font_screen =
-            (crate::annotation_raster::TEXT_FONT_SIZE * canvas_scale).max(8.0);
+            (robs_controller::annotation_raster::TEXT_FONT_SIZE * canvas_scale).max(8.0);
         let screen_bbox = |ann: &robs_core::Annotation| -> egui::Rect {
             match ann.shape() {
                 robs_core::AnnotationShape::Pen => {
@@ -556,7 +556,7 @@ fn paint_annotation(
             let text = ann.text();
             if !text.is_empty() {
                 let font_size =
-                    (crate::annotation_raster::TEXT_FONT_SIZE * canvas_scale).max(8.0);
+                    (robs_controller::annotation_raster::TEXT_FONT_SIZE * canvas_scale).max(8.0);
                 let font = egui::FontId::proportional(font_size);
                 painter.text(start, egui::Align2::LEFT_TOP, text, font, color);
             }

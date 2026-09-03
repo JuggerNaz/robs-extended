@@ -17,12 +17,12 @@
 //! no-recording retro case.
 
 use super::state::EventLogKind;
-use super::RobsApp;
+use super::RobsController;
 
 /// One closed mark: frame span `[start, end)` in file-position frames of the
 /// current recording session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ClipMark {
+pub struct ClipMark {
     pub(crate) start_frame: u64,
     pub(crate) end_frame: u64,
 }
@@ -93,18 +93,18 @@ pub(crate) fn build_clip_args(input: &str, output: &str, mark: &ClipMark, fps: f
 }
 
 /// One result per exported clip, sent from the export thread.
-pub(crate) struct ClipExportResult {
+pub struct ClipExportResult {
     pub(crate) index: usize,
     pub(crate) path: String,
     pub(crate) ok: bool,
     pub(crate) message: Option<String>,
 }
 
-impl RobsApp {
+impl RobsController {
     /// Mark In / Mark Out button handler. Requires a live recording; allowed
     /// while paused (the paused position is the resume point, which is still
     /// the correct content time).
-    pub(crate) fn toggle_clip_mark(&mut self) {
+    pub fn toggle_clip_mark(&mut self) {
         if !self.record.recording {
             return;
         }
@@ -143,18 +143,11 @@ impl RobsApp {
     /// Hand closed marks to a background thread that stream-copies each span
     /// out of the finalized recording. Called from `stop_recording` (which
     /// already blocks the UI thread — cutting must not happen inline).
-    pub(crate) fn start_clip_exports(
-        &mut self,
-        recording_path: String,
-        marks: Vec<ClipMark>,
-        fps: f32,
-        ctx: &eframe::egui::Context,
-    ) {
+    pub(crate) fn start_clip_exports(&mut self, recording_path: String, marks: Vec<ClipMark>, fps: f32) {
         let (tx, rx) = std::sync::mpsc::channel::<ClipExportResult>();
         self.record.clip_export_rx = Some(rx);
         self.record.clip_export_pending = marks.len() as u32;
 
-        let ctx = ctx.clone();
         std::thread::spawn(move || {
             let input = std::path::Path::new(&recording_path);
             let stem = input
@@ -180,7 +173,6 @@ impl RobsApp {
                         message: Some("failed to create Clips directory".into()),
                     });
                 }
-                ctx.request_repaint();
                 return;
             }
 
@@ -225,7 +217,6 @@ impl RobsApp {
                     if ok { "saved" } else { "FAILED" }
                 );
             }
-            ctx.request_repaint();
         });
     }
 

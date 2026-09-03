@@ -1,7 +1,8 @@
 //! Right-hand panel: event log, controls, audio mixer, chat, stats.
 //! Extracted verbatim from `app.rs`.
 
-use super::super::state::EventLogKind;
+use robs_controller::state::EventLogKind;
+use robs_controller::RobsController;
 use super::super::RobsApp;
 use eframe::egui;
 
@@ -169,7 +170,7 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
                                         self.record.recording,
                                         egui::Button::new(egui::RichText::new("\u{23F9} Stop Record").color(egui::Color32::RED)),
                                     ).clicked() {
-                                        self.stop_recording(ui.ctx());
+                                        self.stop_recording();
                                     }
 
                                     // ---- Clip marking ----
@@ -306,7 +307,7 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
                                     ui.end_row();
                                     if self.streaming {
                                         ui.label("Duration:");
-                                        ui.label(Self::format_time(self.streaming_time / 1000));
+                                        ui.label(RobsController::format_time(self.streaming_time / 1000));
                                         ui.end_row();
                                     }
                                     ui.label("Frame Rate:");
@@ -345,7 +346,7 @@ let (r_icon, _r_label, r_color) = if !self.record.recording {
             "robs_event_log_{}.pdf",
             chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
         );
-        let start_dir = super::super::user_home().unwrap_or_default();
+        let start_dir = robs_controller::user_home().unwrap_or_default();
         let Some(path) = rfd::FileDialog::new()
             .set_directory(start_dir)
             .set_file_name(default_name)

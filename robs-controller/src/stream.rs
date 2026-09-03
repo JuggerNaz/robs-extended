@@ -7,7 +7,7 @@
 //! channel that a dedicated writer thread drains into FFmpeg's stdin.
 
 use super::state::EventLogKind;
-use super::RobsApp;
+use super::RobsController;
 use std::process::Stdio;
 
 /// Join an RTMP server URL and stream key into the full push URL.
@@ -27,8 +27,8 @@ fn build_rtmp_url(server: &str, key: &str) -> Result<String, String> {
     Ok(format!("{}/{}", server.trim_end_matches('/'), key))
 }
 
-impl RobsApp {
-    pub(crate) fn start_streaming(&mut self) {
+impl RobsController {
+    pub fn start_streaming(&mut self) {
         if self.streaming {
             return;
         }
@@ -176,7 +176,7 @@ impl RobsApp {
         );
     }
 
-    pub(crate) fn stop_streaming(&mut self) {
+    pub fn stop_streaming(&mut self) {
         eprintln!("[Stream] Stopping stream...");
 
         // 1. Signal the writer thread, 2. close the channel, 3. join the

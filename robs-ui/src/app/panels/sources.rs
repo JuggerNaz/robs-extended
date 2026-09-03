@@ -96,22 +96,26 @@ impl RobsApp {
                     ui.horizontal(|ui| {
                         if ui.button("Apply").clicked() {
                             if let Some(id) = self.editing.editing_source_id {
+                                // Copy the edit fields out first: `scenes` and
+                                // `editing` are both reached through the
+                                // controller deref, so the `&mut` scene borrow
+                                // would otherwise block reading the fields.
+                                let pos_x = self.editing.editing_source_pos_x;
+                                let pos_y = self.editing.editing_source_pos_y;
+                                let scale_x = self.editing.editing_source_scale_x;
+                                let scale_y = self.editing.editing_source_scale_y;
+                                let rotation = self.editing.editing_source_rotation;
+                                let crop_left = self.editing.editing_source_crop_left;
+                                let crop_top = self.editing.editing_source_crop_top;
+                                let crop_right = self.editing.editing_source_crop_right;
+                                let crop_bottom = self.editing.editing_source_crop_bottom;
                                 if let Some(scene) = self.scenes.current_scene_mut() {
                                     if let Some(item) = scene.item_mut(id) {
-                                        item.set_position(Position::new(
-                                            self.editing.editing_source_pos_x,
-                                            self.editing.editing_source_pos_y,
-                                        ));
-                                        item.set_scale(Scale::new(
-                                            self.editing.editing_source_scale_x,
-                                            self.editing.editing_source_scale_y,
-                                        ));
-                                        item.set_rotation(self.editing.editing_source_rotation);
+                                        item.set_position(Position::new(pos_x, pos_y));
+                                        item.set_scale(Scale::new(scale_x, scale_y));
+                                        item.set_rotation(rotation);
                                         item.set_crop(Crop::new(
-                                            self.editing.editing_source_crop_left,
-                                            self.editing.editing_source_crop_top,
-                                            self.editing.editing_source_crop_right,
-                                            self.editing.editing_source_crop_bottom,
+                                            crop_left, crop_top, crop_right, crop_bottom,
                                         ));
                                     }
                                 }

@@ -8,6 +8,7 @@ members = [
     "robs-encoding",
     "robs-outputs",
     "robs-sources",
+    "robs-controller",
     "robs-ui",
     "robs-plugins",
     "robs-profiles",
@@ -50,6 +51,7 @@ robs-audio = { path = "robs-audio" }
 robs-encoding = { path = "robs-encoding" }
 robs-outputs = { path = "robs-outputs" }
 robs-sources = { path = "robs-sources" }
+robs-controller = { path = "robs-controller" }
 robs-ui = { path = "robs-ui" }
 robs-plugins = { path = "robs-plugins" }
 robs-profiles = { path = "robs-profiles" }
