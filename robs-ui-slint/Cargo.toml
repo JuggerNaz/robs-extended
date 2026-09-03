@@ -1,0 +1,13 @@
+[package]
+name = "robs-ui-slint"
+version.workspace = true
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+slint.workspace = true
+robs-controller.workspace = true
+robs-core.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true

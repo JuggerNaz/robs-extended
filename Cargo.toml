@@ -10,6 +10,7 @@ members = [
     "robs-sources",
     "robs-controller",
     "robs-ui",
+    "robs-ui-slint",
     "robs-plugins",
     "robs-profiles",
     "robs-chat",
@@ -18,7 +19,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.92"
 license = "GPL-3.0"
 authors = ["ROBS Contributors"]
 
@@ -40,6 +41,8 @@ toml = "0.8"
 async-trait = "0.1"
 futures = "0.3"
 eframe = { version = "0.29", features = ["default"] }
+slint = "1.17"
+slint-build = "1.17"
 fastrand = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 image = "0.25"
@@ -53,6 +56,7 @@ robs-outputs = { path = "robs-outputs" }
 robs-sources = { path = "robs-sources" }
 robs-controller = { path = "robs-controller" }
 robs-ui = { path = "robs-ui" }
+robs-ui-slint = { path = "robs-ui-slint" }
 robs-plugins = { path = "robs-plugins" }
 robs-profiles = { path = "robs-profiles" }
 robs-chat = { path = "robs-chat" }

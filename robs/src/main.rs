@@ -1,8 +1,30 @@
 use robs_chat::aggregator::ChatAggregator;
 use robs_chat::message::ChatPlatform;
+use robs_controller::RobsController;
 use robs_ui::RobsApp;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+/// `--ui slint|egui` selector (default `egui` until the Slint shell reaches
+/// parity in Phase 4).
+fn parse_ui_choice() -> &'static str {
+    let mut choice = "egui";
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--ui" {
+            match args.next().as_deref() {
+                Some("slint") => choice = "slint",
+                Some("egui") => {}
+                Some(other) => {
+                    eprintln!("[ROBS] Unknown --ui value '{other}', falling back to egui")
+                }
+                None => eprintln!("[ROBS] --ui expects a value, falling back to egui"),
+            }
+            break;
+        }
+    }
+    choice
+}
 
 fn main() {
     // Only enable ERROR level to eliminate TRACE noise
@@ -70,6 +92,14 @@ fn main() {
     });
 
     println!("[ROBS] Starting UI...");
+
+    if parse_ui_choice() == "slint" {
+        let controller = RobsController::new().with_chat(chat_aggregator.clone(), chat_rx);
+        if let Err(err) = robs_ui_slint::run(controller) {
+            eprintln!("[ROBS] Slint UI exited with error: {err}");
+        }
+        return;
+    }
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

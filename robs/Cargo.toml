@@ -9,12 +9,14 @@ path = "src/main.rs"
 
 [dependencies]
 robs-core.workspace = true
+robs-controller.workspace = true
 robs-video.workspace = true
 robs-audio.workspace = true
 robs-encoding.workspace = true
 robs-outputs.workspace = true
 robs-sources.workspace = true
 robs-ui.workspace = true
+robs-ui-slint.workspace = true
 robs-plugins.workspace = true
 robs-profiles.workspace = true
 robs-chat.workspace = true
