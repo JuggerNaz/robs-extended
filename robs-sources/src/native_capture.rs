@@ -124,6 +124,7 @@ pub fn capture_window(hwnd: isize) -> Option<(Vec<u8>, u32, u32)> {
     use windows::Win32::Foundation::*;
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
     unsafe {
         let hwnd = HWND(hwnd as *mut std::ffi::c_void);
