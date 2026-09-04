@@ -1,0 +1,59 @@
+//! Phase 2 (batch A) view contract: scenes rail, source management, text
+//! overlays, and the source-properties dialog. Additive to the frozen `Api`
+//! global in `api.slint` — nothing there is modified.
+
+export struct SourceRowView {
+    id: int,
+    name: string,
+    visible: bool,
+}
+
+export struct OverlayView {
+    id: int,
+    text: string,
+    visible: bool,
+}
+
+export global SourcesApi {
+    // ---- Commands (UI -> glue) ----
+    callback add-scene();
+    callback remove-scene();
+    // Indexes address the pushed picker lists (monitors / windows); cameras
+    // address by device name directly.
+    callback add-display-source(int);
+    callback add-window-source(int);
+    callback add-webcam-source(string);
+    callback source-properties(int);
+    callback move-source-up(int);
+    callback move-source-down(int);
+    callback remove-source(int);
+    callback set-source-visible(int, bool);
+    callback add-overlay(string);
+    callback remove-overlay(int);
+    callback set-overlay-visible(int, bool);
+
+    // Source-properties dialog: reads the in-out fields, writes them back.
+    callback apply-properties();
+    callback cancel-properties();
+
+    // ---- View models (glue -> UI) ----
+    in property <[string]> monitor-names;
+    in property <[string]> window-names;
+    in property <[string]> camera-names;
+    in property <[SourceRowView]> source-rows;
+    in property <[OverlayView]> overlays;
+
+    // ---- Properties dialog (glue seeds on open, dialog edits, glue reads on
+    // apply). Values are strings so the LineEdits can bind two-way. ----
+    in-out property <bool> properties-open;
+    in-out property <string> prop-name;
+    in-out property <string> prop-pos-x;
+    in-out property <string> prop-pos-y;
+    in-out property <string> prop-scale-x;
+    in-out property <string> prop-scale-y;
+    in-out property <string> prop-rotation;
+    in-out property <string> prop-crop-left;
+    in-out property <string> prop-crop-top;
+    in-out property <string> prop-crop-right;
+    in-out property <string> prop-crop-bottom;
+}

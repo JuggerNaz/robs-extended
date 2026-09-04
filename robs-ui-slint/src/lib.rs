@@ -8,7 +8,9 @@
 //! Callbacks and the timer both run on the UI thread, so the controller is
 //! shared behind `Rc<RefCell<..>>` — no locks.
 
+mod panels_glue;
 mod push;
+mod sources_glue;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -117,11 +119,21 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
         });
     }
 
+    // ---- Phase 2 panels: scenes rail / sources / overlays / properties ----
+    let sources = Rc::new(RefCell::new(sources_glue::SourcesUi::new()));
+    sources_glue::install(&component.as_weak(), &controller, &sources);
+
+    // ---- Phase 2 panels: mixer / chat / stats / event log / settings / menu ----
+    let panels = Rc::new(RefCell::new(panels_glue::PanelsUi::new()));
+    panels_glue::install(&component.as_weak(), &controller, &panels);
+
     // ---- Models + initial paint before the first tick ----
     let pushed = Rc::new(RefCell::new(push::PushedState::new()));
     api.set_scene_items(pushed.borrow().scene_items.clone());
     api.set_item_frames(pushed.borrow().item_frames.clone());
     push::push_state(&component, &mut controller.borrow_mut(), &mut pushed.borrow_mut());
+    sources_glue::push(&component, &mut controller.borrow_mut(), &mut sources.borrow_mut());
+    panels_glue::push(&component, &mut controller.borrow_mut(), &mut panels.borrow_mut());
 
     // ---- Tick timer: SingleShot, re-armed with the engine's wake hint ----
     // A `slint::Timer` cannot be re-armed with a NEW interval from inside its
@@ -139,6 +151,8 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
             &component,
             &controller,
             &pushed,
+            &sources,
+            &panels,
             IDLE_TICK,
         );
     }
@@ -155,6 +169,8 @@ fn arm_tick(
     component: &slint::Weak<MainWindow>,
     controller: &Rc<RefCell<RobsController>>,
     pushed: &Rc<RefCell<push::PushedState>>,
+    sources: &Rc<RefCell<sources_glue::SourcesUi>>,
+    panels: &Rc<RefCell<panels_glue::PanelsUi>>,
     delay: Duration,
 ) {
     let this = Rc::clone(timer);
@@ -163,10 +179,14 @@ fn arm_tick(
     let component = component.clone();
     let controller = Rc::clone(controller);
     let pushed = Rc::clone(pushed);
+    let sources = Rc::clone(sources);
+    let panels = Rc::clone(panels);
     this.start(TimerMode::SingleShot, delay, move || {
         let wake = controller.borrow_mut().tick();
         if let Some(component) = component.upgrade() {
             push::push_state(&component, &mut controller.borrow_mut(), &mut pushed.borrow_mut());
+            sources_glue::push(&component, &mut controller.borrow_mut(), &mut sources.borrow_mut());
+            panels_glue::push(&component, &mut controller.borrow_mut(), &mut panels.borrow_mut());
         }
         arm_tick(
             &next,
@@ -174,6 +194,8 @@ fn arm_tick(
             &component,
             &controller,
             &pushed,
+            &sources,
+            &panels,
             wake.unwrap_or(IDLE_TICK),
         );
     });

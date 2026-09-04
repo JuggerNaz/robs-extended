@@ -1,0 +1,103 @@
+//! Audio Mixer tab: per-channel M (mute) checkbox, name, volume slider, and
+//! a percentage + level meter — the port of the egui `Audio Mixer` section
+//! (`robs-ui/src/app/panels/right.rs`). Rows are driven by the
+//! `PanelsApi.audio-channels` model; slider/checkbox edits go straight back
+//! to the glue.
+
+import { Theme } from "theme.slint";
+import { PanelsApi, AudioChannelView } from "panels_api.slint";
+import { CheckBox, Slider } from "std-widgets.slint";
+
+component ChannelRow inherits Rectangle {
+    in property <AudioChannelView> channel;
+
+    // Local two-way copies: the slider/checkbox own these values while the
+    // row lives; the glue mirrors them back into the (rebuilt) model.
+    property <float> vol: root.channel.volume;
+    property <bool> mute: root.channel.muted;
+
+    height: 46px;
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 2px;
+
+        HorizontalLayout {
+            height: 22px;
+            spacing: Theme.spacing-sm;
+
+            CheckBox {
+                text: "M";
+                checked <=> root.mute;
+                toggled => {
+                    PanelsApi.set-audio-muted(root.channel.index, root.mute);
+                }
+            }
+            Text {
+                width: 108px;
+                text: root.channel.name;
+                font-size: Theme.font-sm;
+                color: Theme.text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Slider {
+                horizontal-stretch: 1;
+                minimum: 0;
+                maximum: 1;
+                value <=> root.vol;
+                changed value => {
+                    PanelsApi.set-audio-volume(root.channel.index, root.vol);
+                }
+            }
+            Text {
+                width: 36px;
+                text: root.channel.pct;
+                font-size: Theme.font-sm;
+                color: Theme.text-dim;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+        }
+
+        // Level meter (color bands match the egui meter).
+        Rectangle {
+            height: 6px;
+            border-radius: 3px;
+            background: Theme.card-alt;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                height: parent.height;
+                width: parent.width * root.vol;
+                border-radius: 3px;
+                background: root.vol > 0.9 ? Theme.live-red
+                    : (root.vol > 0.7 ? Theme.warning-orange : Theme.success-green);
+            }
+        }
+    }
+}
+
+export component AudioTab inherits Rectangle {
+    background: transparent;
+
+    if PanelsApi.audio-channels.length == 0: Text {
+        width: parent.width;
+        height: parent.height;
+        text: "No audio channels";
+        font-size: Theme.font-sm;
+        color: Theme.text-dim;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    VerticalLayout {
+        padding: Theme.spacing-sm;
+        spacing: Theme.spacing-xs;
+
+        for ch[i] in PanelsApi.audio-channels: ChannelRow {
+            channel: ch;
+        }
+    }
+}

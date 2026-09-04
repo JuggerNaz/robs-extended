@@ -11,6 +11,20 @@ import { Api } from "api.slint";
 // Re-export so `slint::include_modules!()` exposes the Api global to the
 // Rust glue.
 export { Api }
+import { ScenesRail, MiniTextButton } from "scenes_rail.slint";
+import { SourcesTab } from "sources_tab.slint";
+import { SourcePropertiesDialog } from "source_properties.slint";
+// Re-export so `slint::include_modules!()` exposes the Phase 2 global to the
+// Rust glue as well.
+import { SourcesApi } from "sources_api.slint";
+export { SourcesApi }
+import { PanelsApi } from "panels_api.slint";
+export { PanelsApi }
+import { MenuBar } from "menubar.slint";
+import { AudioTab } from "audio_tab.slint";
+import { ChatTab } from "chat_tab.slint";
+import { StatsTab } from "stats_tab.slint";
+import { SettingsWindow } from "settings.slint";
 import { ListView, TabWidget, Palette } from "std-widgets.slint";
 
 // One Quick Actions bar button: a 56x46 rounded tile with a glyph above a
@@ -120,17 +134,6 @@ export component MainWindow inherits Window {
         background: Theme.card;
 
         HorizontalLayout {
-            x: Theme.spacing-md;
-            height: parent.height;
-            spacing: Theme.spacing-md + 6px;
-            alignment: start;
-
-            Text { text: "File"; font-size: Theme.font-md; color: Theme.text-dim; vertical-alignment: center; }
-            Text { text: "Profiles"; font-size: Theme.font-md; color: Theme.text-dim; vertical-alignment: center; }
-            Text { text: "Tools"; font-size: Theme.font-md; color: Theme.text-dim; vertical-alignment: center; }
-            Text { text: "Help"; font-size: Theme.font-md; color: Theme.text-dim; vertical-alignment: center; }
-        }
-        HorizontalLayout {
             x: root.width - 250px;
             width: 238px;
             height: parent.height;
@@ -152,49 +155,12 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ---- Scenes rail ----
-    Rectangle {
+    // ---- Scenes rail (scenes + sources + text overlays) ----
+    ScenesRail {
         x: 0;
         y: Theme.topbar-h;
         width: Theme.rail-w;
         height: root.height - Theme.topbar-h;
-        background: Theme.card;
-
-        Text {
-            x: Theme.spacing-sm;
-            y: Theme.spacing-sm;
-            text: "SCENES";
-            font-size: Theme.font-xs;
-            color: Theme.text-dim;
-            letter-spacing: 1px;
-        }
-        ListView {
-            x: Theme.spacing-xs;
-            y: 26px;
-            width: parent.width - 2 * Theme.spacing-xs;
-            height: parent.height - 26px - Theme.spacing-xs;
-
-            for name in Api.scene-names: Rectangle {
-                height: 34px;
-                border-radius: Theme.radius-sm;
-                background: name == Api.selected-scene ? Theme.accent
-                    : (rail-touch.has-hover ? Theme.card-alt : transparent);
-
-                rail-touch := TouchArea {
-                    clicked => { Api.select-scene(name); }
-                }
-                Text {
-                    x: Theme.spacing-sm;
-                    width: parent.width - 2 * Theme.spacing-sm;
-                    height: parent.height;
-                    text: name;
-                    font-size: Theme.font-sm;
-                    color: name == Api.selected-scene ? white : Theme.text;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-            }
-        }
     }
 
     // ---- Preview canvas area ----
@@ -382,10 +348,10 @@ export component MainWindow inherits Window {
             width: parent.width - 2 * Theme.spacing-xs;
             height: parent.height - 2 * Theme.spacing-xs;
 
-            Tab { title: "Sources"; Rectangle {} }
-            Tab { title: "Audio"; Rectangle {} }
-            Tab { title: "Chat"; Rectangle {} }
-            Tab { title: "Stats"; Rectangle {} }
+            Tab { title: "Sources"; SourcesTab {} }
+            Tab { title: "Audio"; AudioTab {} }
+            Tab { title: "Chat"; ChatTab {} }
+            Tab { title: "Stats"; StatsTab {} }
         }
     }
 
@@ -397,13 +363,36 @@ export component MainWindow inherits Window {
         height: Theme.log-h;
         background: Theme.card;
 
-        Text {
+        HorizontalLayout {
             x: Theme.spacing-sm;
             y: Theme.spacing-xs;
-            text: "EVENT LOG";
-            font-size: Theme.font-xs;
-            color: Theme.text-dim;
-            letter-spacing: 1px;
+            width: parent.width - 2 * Theme.spacing-sm;
+            height: 18px;
+            spacing: Theme.spacing-xs;
+            alignment: start;
+
+            Text {
+                text: PanelsApi.log-label;
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+                letter-spacing: 1px;
+                vertical-alignment: center;
+            }
+            Rectangle { }
+            MiniTextButton {
+                width: 52px;
+                height: 18px;
+                label: "CLEAR";
+                tint: Theme.text-dim;
+                clicked => { PanelsApi.clear-log(); }
+            }
+            MiniTextButton {
+                width: 44px;
+                height: 18px;
+                label: "PDF";
+                tint: Theme.text-dim;
+                clicked => { PanelsApi.export-log-pdf(); }
+            }
         }
         ListView {
             x: Theme.spacing-xs;
@@ -446,4 +435,27 @@ export component MainWindow inherits Window {
             }
         }
     }
+
+    // ---- Menu bar overlay (dropdowns extend over the regions below; the
+    // click-away backdrop only exists while a menu is open) ----
+    MenuBar {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+
+        new-profile => { PanelsApi.new-profile(); }
+        settings-opened => { PanelsApi.open-settings(); }
+        exit-app => { PanelsApi.exit-app(); }
+        undo => { PanelsApi.undo(); }
+        redo => { PanelsApi.redo(); }
+        about => { PanelsApi.about(); }
+        select-profile(index) => { PanelsApi.select-profile(index); }
+    }
+
+    // ---- Settings window (self-hides unless PanelsApi.settings-open) ----
+    SettingsWindow { }
+
+    // ---- Source-properties modal (topmost; hidden unless open) ----
+    SourcePropertiesDialog { }
 }

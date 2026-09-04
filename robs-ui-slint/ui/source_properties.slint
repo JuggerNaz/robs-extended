@@ -1,0 +1,175 @@
+//! Source-properties dialog (port of the egui `source_properties_modal`).
+//! A modal overlay over the whole window: dimmed backdrop, centered card,
+//! position / scale / rotation / crop fields bound two-way to `SourcesApi`,
+//! Apply / Cancel. The glue seeds the fields on open and reads them on apply.
+
+import { Theme } from "theme.slint";
+import { SourcesApi } from "sources_api.slint";
+import { LineEdit } from "std-widgets.slint";
+import { IconButton, MiniTextButton } from "scenes_rail.slint";
+
+component FieldLabel inherits Text {
+    width: 96px;
+    height: 28px;
+    vertical-alignment: center;
+    font-size: Theme.font-sm;
+    color: Theme.text-dim;
+}
+
+// One label + edit row.
+component FieldRow inherits HorizontalLayout {
+    height: 28px;
+    spacing: Theme.spacing-sm;
+}
+
+export component SourcePropertiesDialog inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    visible: SourcesApi.properties-open;
+    background: #00000080;
+
+    // Swallow clicks on the backdrop so they don't reach the shell.
+    TouchArea { width: 100%; height: 100%; }
+
+    Rectangle {
+        width: 330px;
+        height: 436px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.card-alt;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        VerticalLayout {
+            padding: Theme.spacing-md;
+            spacing: Theme.spacing-sm;
+
+            // ---- Header ----
+            HorizontalLayout {
+                height: 24px;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    horizontal-stretch: 1;
+                    height: parent.height;
+                    text: "Source Properties";
+                    font-size: Theme.font-md;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                }
+                IconButton {
+                    glyph: "\u{2715}";
+                    tint: Theme.text-dim;
+                    clicked => { SourcesApi.cancel-properties(); }
+                }
+            }
+            Text {
+                height: 18px;
+                text: SourcesApi.prop-name;
+                font-size: Theme.font-sm;
+                color: Theme.text-dim;
+                overflow: elide;
+            }
+
+            // ---- Transform + crop fields ----
+            VerticalLayout {
+                vertical-stretch: 1;
+                spacing: Theme.spacing-xs;
+
+                FieldRow {
+                    FieldLabel { text: "Position X"; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        text <=> SourcesApi.prop-pos-x;
+                    }
+                }
+                FieldRow {
+                    FieldLabel { text: "Position Y"; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        text <=> SourcesApi.prop-pos-y;
+                    }
+                }
+                FieldRow {
+                    FieldLabel { text: "Scale X"; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        text <=> SourcesApi.prop-scale-x;
+                    }
+                }
+                FieldRow {
+                    FieldLabel { text: "Scale Y"; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        text <=> SourcesApi.prop-scale-y;
+                    }
+                }
+                FieldRow {
+                    FieldLabel { text: "Rotation"; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        text <=> SourcesApi.prop-rotation;
+                    }
+                }
+                FieldRow {
+                    FieldLabel { text: "Crop Left"; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        text <=> SourcesApi.prop-crop-left;
+                    }
+                }
+                FieldRow {
+                    FieldLabel { text: "Crop Top"; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        text <=> SourcesApi.prop-crop-top;
+                    }
+                }
+                FieldRow {
+                    FieldLabel { text: "Crop Right"; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        text <=> SourcesApi.prop-crop-right;
+                    }
+                }
+                FieldRow {
+                    FieldLabel { text: "Crop Bottom"; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        text <=> SourcesApi.prop-crop-bottom;
+                    }
+                }
+            }
+
+            // ---- Actions ----
+            HorizontalLayout {
+                height: 28px;
+                spacing: Theme.spacing-sm;
+
+                Rectangle { horizontal-stretch: 1; }
+                MiniTextButton {
+                    width: 84px;
+                    label: "Cancel";
+                    tint: Theme.text-dim;
+                    clicked => { SourcesApi.cancel-properties(); }
+                }
+                MiniTextButton {
+                    width: 84px;
+                    label: "Apply";
+                    tint: white;
+                    clicked => { SourcesApi.apply-properties(); }
+                }
+            }
+        }
+    }
+}

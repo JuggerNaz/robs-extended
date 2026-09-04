@@ -1,0 +1,251 @@
+//! Top menu bar: File / Edit / View / Profiles / Help — the port of the egui
+//! menu bar (`robs-ui/src/app/panels/menu.rs`) as a themed overlay. The
+//! component is placed as a full-window transparent layer near the top of
+//! the z-order so its dropdowns extend over the shell below; buttons only
+//! capture clicks inside their own bounds, and an open menu installs a
+//! click-away backdrop that closes it.
+//!
+//! Profiles are dynamic (`profile-names`, indexes passed back through
+//! `select-profile`); the View entries toggle `PanelsApi.show-*` in place.
+
+import { Theme } from "theme.slint";
+import { PanelsApi } from "panels_api.slint";
+
+component MenuEntryButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> open;
+    in property <bool> switch-on-hover: false;
+    callback opened();
+    callback switch-menu();
+
+    width: lbl.preferred-width + 20px;
+    // Height comes from the HorizontalLayout cell (top-bar height).
+    background: root.open || touch.has-hover ? Theme.card-alt : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.opened(); }
+        // Menus switch on hover once any menu is open (real menubar feel).
+        changed has-hover => {
+            if (self.has-hover && root.switch-on-hover && !root.open) {
+                root.switch-menu();
+            }
+        }
+    }
+    lbl := Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        font-size: Theme.font-md;
+        color: root.open || touch.has-hover ? Theme.text : Theme.text-dim;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component MenuItemRow inherits Rectangle {
+    in property <string> label;
+    in property <bool> checked: false;
+    callback triggered();
+
+    height: 26px;
+    background: touch.has-hover ? Theme.accent-dim : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.triggered(); }
+    }
+    Text {
+        x: Theme.spacing-sm;
+        width: parent.width - 2 * Theme.spacing-sm;
+        height: parent.height;
+        text: (root.checked ? "\u{2713} " : "") + root.label;
+        font-size: Theme.font-sm;
+        color: touch.has-hover ? white : Theme.text;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+component MenuSep inherits Rectangle {
+    height: 1px;
+    background: Theme.border;
+}
+
+// One named menu: the top strip button plus its dropdown panel.
+component MenuEntry inherits Rectangle {
+    in property <string> label;
+    in property <bool> open;
+    in property <bool> switch-on-hover: false;
+    callback toggle();
+
+    width: btn.width;
+
+    btn := MenuEntryButton {
+        height: 100%;
+        label: root.label;
+        open: root.open;
+        switch-on-hover: root.switch-on-hover;
+        opened => { root.toggle(); }
+        switch-menu => { root.toggle(); }
+    }
+
+    // Dropdown panel. Always instantiated (`@children` cannot live inside a
+    // conditional element) but hidden while the menu is closed; being
+    // absolutely positioned it occupies no layout space either way.
+    Rectangle {
+        visible: root.open;
+        y: parent.height + 2px;
+        width: 210px;
+        height: col.preferred-height + 2 * Theme.spacing-xs;
+        background: Theme.card;
+        border-radius: Theme.radius-sm;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        col := VerticalLayout {
+            padding: Theme.spacing-xs;
+            spacing: 0px;
+            @children
+        }
+    }
+}
+
+export component MenuBar inherits Rectangle {
+    callback new-profile();
+    callback settings-opened();
+    callback exit-app();
+    callback undo();
+    callback redo();
+    callback about();
+    callback select-profile(int);
+
+    property <int> open-menu: -1;
+
+    // Click-away backdrop: present only while a menu is open, so normal
+    // pointer traffic passes straight through this layer otherwise.
+    if root.open-menu >= 0: TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.open-menu = -1; }
+    }
+
+    HorizontalLayout {
+        x: Theme.spacing-md;
+        y: 0;
+        width: parent.width - Theme.spacing-md;
+        height: Theme.topbar-h;
+        spacing: Theme.spacing-md + 6px;
+        alignment: start;
+
+        MenuEntry {
+            label: "File";
+            open: root.open-menu == 0;
+            switch-on-hover: root.open-menu >= 0;
+            toggle => { root.open-menu = root.open-menu == 0 ? -1 : 0; }
+            MenuItemRow {
+                label: "New Profile";
+                triggered => { root.open-menu = -1; root.new-profile(); }
+            }
+            MenuSep { }
+            MenuItemRow {
+                label: "Settings";
+                triggered => { root.open-menu = -1; root.settings-opened(); }
+            }
+            MenuSep { }
+            MenuItemRow {
+                label: "Exit";
+                triggered => { root.open-menu = -1; root.exit-app(); }
+            }
+        }
+
+        MenuEntry {
+            label: "Edit";
+            open: root.open-menu == 1;
+            switch-on-hover: root.open-menu >= 0;
+            toggle => { root.open-menu = root.open-menu == 1 ? -1 : 1; }
+            MenuItemRow {
+                label: "Undo";
+                triggered => { root.open-menu = -1; root.undo(); }
+            }
+            MenuItemRow {
+                label: "Redo";
+                triggered => { root.open-menu = -1; root.redo(); }
+            }
+        }
+
+        MenuEntry {
+            label: "View";
+            open: root.open-menu == 2;
+            switch-on-hover: root.open-menu >= 0;
+            toggle => { root.open-menu = root.open-menu == 2 ? -1 : 2; }
+            // Toggles keep the menu open, exactly like egui checkboxes.
+            MenuItemRow {
+                label: "Preview";
+                checked: PanelsApi.show-preview;
+                triggered => { PanelsApi.show-preview = !PanelsApi.show-preview; }
+            }
+            MenuItemRow {
+                label: "Scenes";
+                checked: PanelsApi.show-scenes;
+                triggered => { PanelsApi.show-scenes = !PanelsApi.show-scenes; }
+            }
+            MenuItemRow {
+                label: "Controls";
+                checked: PanelsApi.show-controls;
+                triggered => { PanelsApi.show-controls = !PanelsApi.show-controls; }
+            }
+            MenuItemRow {
+                label: "Audio Mixer";
+                checked: PanelsApi.show-audio;
+                triggered => { PanelsApi.show-audio = !PanelsApi.show-audio; }
+            }
+            MenuItemRow {
+                label: "Chat";
+                checked: PanelsApi.show-chat;
+                triggered => { PanelsApi.show-chat = !PanelsApi.show-chat; }
+            }
+            MenuItemRow {
+                label: "Stats";
+                checked: PanelsApi.show-stats;
+                triggered => { PanelsApi.show-stats = !PanelsApi.show-stats; }
+            }
+            MenuItemRow {
+                label: "Event Log";
+                checked: PanelsApi.show-event-log;
+                triggered => { PanelsApi.show-event-log = !PanelsApi.show-event-log; }
+            }
+            MenuSep { }
+            MenuItemRow {
+                label: "Annotations Toolbar";
+                checked: PanelsApi.show-annotations;
+                triggered => { PanelsApi.show-annotations = !PanelsApi.show-annotations; }
+            }
+        }
+
+        MenuEntry {
+            label: "Profiles";
+            open: root.open-menu == 3;
+            switch-on-hover: root.open-menu >= 0;
+            toggle => { root.open-menu = root.open-menu == 3 ? -1 : 3; }
+            for name[i] in PanelsApi.profile-names: MenuItemRow {
+                label: name;
+                triggered => {
+                    root.open-menu = -1;
+                    root.select-profile(i);
+                }
+            }
+        }
+
+        MenuEntry {
+            label: "Help";
+            open: root.open-menu == 4;
+            switch-on-hover: root.open-menu >= 0;
+            toggle => { root.open-menu = root.open-menu == 4 ? -1 : 4; }
+            MenuItemRow {
+                label: "About ROBS";
+                triggered => { root.open-menu = -1; root.about(); }
+            }
+        }
+    }
+}

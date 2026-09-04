@@ -1,0 +1,91 @@
+//! Chat tab: the unified chat feed (author names colored per user/platform
+//! like the egui panel) plus a Send input. Messages come from the glue's
+//! `PanelsApi.chat-messages` model; Send hands the text back (the send
+//! pipeline itself is a stub, exactly as in egui).
+
+import { Theme } from "theme.slint";
+import { PanelsApi, ChatMessageView } from "panels_api.slint";
+import { MiniTextButton } from "scenes_rail.slint";
+import { LineEdit, ListView } from "std-widgets.slint";
+
+component ChatRow inherits Rectangle {
+    in property <ChatMessageView> message;
+
+    // Row height follows the wrapped message body.
+    height: body.preferred-height + 6px;
+    background: transparent;
+
+    body := HorizontalLayout {
+        padding-left: Theme.spacing-sm;
+        padding-right: Theme.spacing-sm;
+        padding-top: 3px;
+        spacing: Theme.spacing-xs;
+
+        Text {
+            width: 78px;
+            text: root.message.author;
+            color: root.message.color;
+            font-size: Theme.font-sm;
+            font-weight: 700;
+            overflow: elide;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.message.text;
+            color: Theme.text;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component ChatTab inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding: Theme.spacing-xs;
+        spacing: Theme.spacing-xs;
+
+        Rectangle {
+            vertical-stretch: 1;
+
+            if PanelsApi.chat-messages.length == 0: Text {
+                width: parent.width;
+                height: parent.height;
+                text: "No messages";
+                font-size: Theme.font-sm;
+                color: Theme.text-dim;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            ListView {
+                for message in PanelsApi.chat-messages: ChatRow {
+                    message: message;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            height: 28px;
+            spacing: Theme.spacing-xs;
+
+            input := LineEdit {
+                horizontal-stretch: 1;
+                placeholder-text: "Send a message...";
+                accepted(text) => {
+                    PanelsApi.send-chat(text);
+                    input.text = "";
+                }
+            }
+            MiniTextButton {
+                width: 54px;
+                label: "SEND";
+                clicked => {
+                    PanelsApi.send-chat(input.text);
+                    input.text = "";
+                }
+            }
+        }
+    }
+}
