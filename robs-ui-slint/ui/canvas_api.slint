@@ -1,0 +1,103 @@
+//! Phase 3 view contract: the annotation toolbar, canvas editing (item
+//! drag/resize, annotation draw/select/text tools) and on-canvas text
+//! overlays. Additive to the frozen `Api` global and the Phase 2 globals —
+//! nothing there is modified.
+//!
+//! Geometry convention: shapes arrive as SVG-like path `commands` expressed
+//! in SCENE coordinates and are mapped through the Path's `viewbox` (the
+//! scene output size), so the markup letterboxes them for free. Only pixel
+//! sizes (stroke width, font size) and text anchors are pre-scaled to canvas
+//! pixels by the glue. All pointer coordinates are canvas-relative.
+
+export struct AnnotationView {
+    id: int,
+    // SVG-like path in scene coordinates (empty for text annotations).
+    commands: string,
+    stroke: color,
+    // Stroke width in canvas pixels (passed through — the egui renderer
+    // kept stroke widths in screen pixels, unscaled by the canvas fit).
+    stroke-width: float,
+    filled: bool,
+    is-text: bool,
+    text: string,
+    // Canvas-pixel anchor for text annotations.
+    x: float,
+    y: float,
+    font-size: float,
+    selected: bool,
+}
+
+export struct CanvasTextView {
+    id: int,
+    text: string,
+    // Canvas-pixel top-left of the label.
+    x: float,
+    y: float,
+    font-size: float,
+}
+
+export global CanvasApi {
+    // ---- Commands (UI -> glue) ----
+    // Pointer traffic from the canvas overlay; coordinates are
+    // canvas-relative pixels.
+    callback canvas-press(float, float);
+    callback canvas-move(float, float);
+    callback canvas-release(float, float);
+    // Delete/Backspace removes the selected annotation (routed from the
+    // window-level key scope).
+    callback delete-selected();
+    // Inline text editor: Enter commits (empty text deletes the annotation),
+    // the ✕ button cancels (always deletes).
+    callback commit-text-edit(string);
+    callback cancel-text-edit();
+    // Toolbar.
+    // 0 Select, 1 Arrow, 2 Line, 3 Rectangle, 4 Ellipse, 5 Pen, 6 Text.
+    callback set-tool(int);
+    callback set-stroke-color(color);
+    callback set-stroke-width(float);
+    callback set-filled(bool);
+    callback undo-annotation();
+    callback clear-annotations();
+
+    // ---- View models (glue -> UI) ----
+    in property <[AnnotationView]> annotations;
+    // The shape/pen currently being drawn (valid while drawing-active).
+    in property <AnnotationView> drawing;
+    in property <bool> drawing-active;
+    // Scene output size — the Path viewbox for annotation coordinates.
+    in property <float> scene-width;
+    in property <float> scene-height;
+    // Selection outline around the selected annotation (canvas px, already
+    // expanded by the glue).
+    in property <bool> has-selection;
+    in property <float> sel-x;
+    in property <float> sel-y;
+    in property <float> sel-width;
+    in property <float> sel-height;
+    // Text overlays rendered on the canvas (draggable).
+    in property <[CanvasTextView]> text-overlays;
+    // Index into `Api.scene-items` of the canvas-selected scene item (-1 =
+    // none). Set by the canvas click hit-test; drives the corner resize
+    // handles in the markup.
+    in-out property <int> selected-item-index;
+
+    // ---- Inline text-annotation editor (shown while `editing`) ----
+    in property <bool> editing;
+    // Editor anchor in canvas pixels.
+    in property <float> edit-x;
+    in property <float> edit-y;
+    // Two-way buffer: markup binds it to the LineEdit, the glue seeds it
+    // when the editor opens and reads it back on commit.
+    in-out property <string> text-input;
+
+    // ---- Toolbar mirrors ----
+    in property <int> tool;
+    in property <color> stroke-color;
+    in-out property <float> stroke-width;
+    // Fill checkbox is only meaningful for closed shapes (Rectangle/Ellipse).
+    in property <bool> fill-enabled;
+    in property <bool> filled;
+    // True while a shape/pen/text tool is active (items stop being draggable,
+    // handles hide — egui `draw_active` parity).
+    in property <bool> draw-active;
+}

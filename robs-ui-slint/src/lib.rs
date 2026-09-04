@@ -8,6 +8,7 @@
 //! Callbacks and the timer both run on the UI thread, so the controller is
 //! shared behind `Rc<RefCell<..>>` — no locks.
 
+mod canvas_glue;
 mod panels_glue;
 mod push;
 mod sources_glue;
@@ -127,8 +128,15 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
     let panels = Rc::new(RefCell::new(panels_glue::PanelsUi::new()));
     panels_glue::install(&component.as_weak(), &controller, &panels);
 
-    // ---- Models + initial paint before the first tick ----
+    // ---- Phase 3: canvas editing (items + annotations + overlays) ----
+    // `pushed` is created before the canvas install: the pointer callbacks
+    // read `pushed.canvas` (refreshed every tick by `push_state`) to convert
+    // canvas-relative pixels to scene coordinates.
     let pushed = Rc::new(RefCell::new(push::PushedState::new()));
+    let canvas = Rc::new(RefCell::new(canvas_glue::CanvasUi::new()));
+    canvas_glue::install(&component.as_weak(), &controller, &canvas, &pushed);
+
+    // ---- Models + initial paint before the first tick ----
     api.set_scene_items(pushed.borrow().scene_items.clone());
     api.set_item_frames(pushed.borrow().item_frames.clone());
     push::push_state(&component, &mut controller.borrow_mut(), &mut pushed.borrow_mut());
