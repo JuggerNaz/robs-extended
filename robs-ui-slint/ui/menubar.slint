@@ -24,7 +24,9 @@ component MenuEntryButton inherits Rectangle {
 
     touch := TouchArea {
         mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
-        clicked => { root.opened(); }
+        clicked => {
+            root.opened();
+        }
         // Menus switch on hover once any menu is open (real menubar feel).
         changed has-hover => {
             if (self.has-hover && root.switch-on-hover && !root.open) {
@@ -53,7 +55,9 @@ component MenuItemRow inherits Rectangle {
 
     touch := TouchArea {
         mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
-        clicked => { root.triggered(); }
+        clicked => {
+            root.triggered();
+        }
     }
     Text {
         x: Theme.spacing-sm;
@@ -78,6 +82,8 @@ component MenuEntry inherits Rectangle {
     in property <bool> open;
     in property <bool> switch-on-hover: false;
     callback toggle();
+    // Hover-switch: this menu opens because another menu was already open.
+    callback switched-to();
 
     width: btn.width;
 
@@ -87,13 +93,16 @@ component MenuEntry inherits Rectangle {
         open: root.open;
         switch-on-hover: root.switch-on-hover;
         opened => { root.toggle(); }
-        switch-menu => { root.toggle(); }
+        switch-menu => { root.switched-to(); }
     }
 
     // Dropdown panel. Always instantiated (`@children` cannot live inside a
     // conditional element) but hidden while the menu is closed; being
     // absolutely positioned it occupies no layout space either way.
     Rectangle {
+        // Anchor explicitly: with no `x` the panel is centered beside the
+        // hosted VerticalLayout (rendered ~(width-210px)/2 left of the menu).
+        x: 0;
         visible: root.open;
         y: parent.height + 2px;
         width: 210px;
@@ -121,13 +130,33 @@ export component MenuBar inherits Rectangle {
     callback select-profile(int);
 
     property <int> open-menu: -1;
+    // Index of a menu opened by hover-switching; the trailing click on it is
+    // swallowed so the switch doesn't immediately close it again.
+    property <int> just-switched: -1;
+
+    // Escape closes the open menu. The scope grabs focus at startup; it has
+    // no pointer handling, so clicks pass through to the layers below.
+    foc := FocusScope {
+        width: 100%;
+        height: 100%;
+        init => { self.focus(); }
+        key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                root.open-menu = -1;
+                root.just-switched = -1;
+                accept
+            } else {
+                reject
+            }
+        }
+    }
 
     // Click-away backdrop: present only while a menu is open, so normal
     // pointer traffic passes straight through this layer otherwise.
     if root.open-menu >= 0: TouchArea {
         width: 100%;
         height: 100%;
-        clicked => { root.open-menu = -1; }
+        clicked => { root.open-menu = -1; root.just-switched = -1; }
     }
 
     HorizontalLayout {
@@ -142,7 +171,18 @@ export component MenuBar inherits Rectangle {
             label: "File";
             open: root.open-menu == 0;
             switch-on-hover: root.open-menu >= 0;
-            toggle => { root.open-menu = root.open-menu == 0 ? -1 : 0; }
+            toggle => {
+                if (root.just-switched == 0) {
+                    root.just-switched = -1;
+                } else {
+                    root.just-switched = -1;
+                    root.open-menu = root.open-menu == 0 ? -1 : 0;
+                }
+            }
+            switched-to => {
+                root.just-switched = 0;
+                root.open-menu = 0;
+            }
             MenuItemRow {
                 label: "New Profile";
                 triggered => { root.open-menu = -1; root.new-profile(); }
@@ -163,7 +203,18 @@ export component MenuBar inherits Rectangle {
             label: "Edit";
             open: root.open-menu == 1;
             switch-on-hover: root.open-menu >= 0;
-            toggle => { root.open-menu = root.open-menu == 1 ? -1 : 1; }
+            toggle => {
+                if (root.just-switched == 1) {
+                    root.just-switched = -1;
+                } else {
+                    root.just-switched = -1;
+                    root.open-menu = root.open-menu == 1 ? -1 : 1;
+                }
+            }
+            switched-to => {
+                root.just-switched = 1;
+                root.open-menu = 1;
+            }
             MenuItemRow {
                 label: "Undo";
                 triggered => { root.open-menu = -1; root.undo(); }
@@ -178,7 +229,18 @@ export component MenuBar inherits Rectangle {
             label: "View";
             open: root.open-menu == 2;
             switch-on-hover: root.open-menu >= 0;
-            toggle => { root.open-menu = root.open-menu == 2 ? -1 : 2; }
+            toggle => {
+                if (root.just-switched == 2) {
+                    root.just-switched = -1;
+                } else {
+                    root.just-switched = -1;
+                    root.open-menu = root.open-menu == 2 ? -1 : 2;
+                }
+            }
+            switched-to => {
+                root.just-switched = 2;
+                root.open-menu = 2;
+            }
             // Toggles keep the menu open, exactly like egui checkboxes.
             MenuItemRow {
                 label: "Preview";
@@ -213,7 +275,9 @@ export component MenuBar inherits Rectangle {
             MenuItemRow {
                 label: "Event Log";
                 checked: PanelsApi.show-event-log;
-                triggered => { PanelsApi.show-event-log = !PanelsApi.show-event-log; }
+                triggered => {
+                    PanelsApi.show-event-log = !PanelsApi.show-event-log;
+                }
             }
             MenuSep { }
             MenuItemRow {
@@ -227,7 +291,18 @@ export component MenuBar inherits Rectangle {
             label: "Profiles";
             open: root.open-menu == 3;
             switch-on-hover: root.open-menu >= 0;
-            toggle => { root.open-menu = root.open-menu == 3 ? -1 : 3; }
+            toggle => {
+                if (root.just-switched == 3) {
+                    root.just-switched = -1;
+                } else {
+                    root.just-switched = -1;
+                    root.open-menu = root.open-menu == 3 ? -1 : 3;
+                }
+            }
+            switched-to => {
+                root.just-switched = 3;
+                root.open-menu = 3;
+            }
             for name[i] in PanelsApi.profile-names: MenuItemRow {
                 label: name;
                 triggered => {
@@ -241,7 +316,18 @@ export component MenuBar inherits Rectangle {
             label: "Help";
             open: root.open-menu == 4;
             switch-on-hover: root.open-menu >= 0;
-            toggle => { root.open-menu = root.open-menu == 4 ? -1 : 4; }
+            toggle => {
+                if (root.just-switched == 4) {
+                    root.just-switched = -1;
+                } else {
+                    root.just-switched = -1;
+                    root.open-menu = root.open-menu == 4 ? -1 : 4;
+                }
+            }
+            switched-to => {
+                root.just-switched = 4;
+                root.open-menu = 4;
+            }
             MenuItemRow {
                 label: "About ROBS";
                 triggered => { root.open-menu = -1; root.about(); }

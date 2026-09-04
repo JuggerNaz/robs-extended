@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::{Api, LogLineView, MainWindow, SceneItemView};
+use crate::{Api, LogLineView, MainWindow, PanelsApi, SceneItemView};
 use robs_controller::state::{EventLogEntry, EventLogKind, PreviewFrame};
 use robs_controller::RobsController;
 use robs_core::SceneItemId;
@@ -137,11 +137,20 @@ pub fn push_state(
         .unwrap_or_default();
 
     // ---- Canvas fit math (ported verbatim from the old preview panel) ----
-    let area_x = layout::RAIL_W;
+    // Effective insets mirror the View-menu visibility bindings in
+    // `ui/mainwindow.slint` (rail/right/log/actions collapse to zero when
+    // the corresponding PanelsApi show-* flag is off).
+    let panels = component.global::<PanelsApi>();
+    let rail_w = if panels.get_show_scenes() { layout::RAIL_W } else { 0.0 };
+    let right_shown =
+        panels.get_show_audio() || panels.get_show_chat() || panels.get_show_stats();
+    let right_w = if right_shown { layout::RIGHT_W } else { 0.0 };
+    let actions_h = if panels.get_show_controls() { layout::ACTIONS_H } else { 0.0 };
+    let log_h = if panels.get_show_event_log() { layout::LOG_H } else { 0.0 };
+    let area_x = rail_w;
     let area_y = layout::TOPBAR_H;
-    let area_w = (win_w - layout::RAIL_W - layout::RIGHT_W).max(1.0);
-    let area_h =
-        (win_h - layout::TOPBAR_H - layout::ACTIONS_H - layout::LOG_H).max(1.0);
+    let area_w = (win_w - rail_w - right_w).max(1.0);
+    let area_h = (win_h - layout::TOPBAR_H - actions_h - log_h).max(1.0);
 
     let scale_x = area_w / scene_w as f32;
     let scale_y = area_h / scene_h as f32;

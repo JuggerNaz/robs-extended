@@ -125,6 +125,14 @@ export component MainWindow inherits Window {
         Palette.color-scheme = ColorScheme.dark;
     }
 
+    // ---- View-menu visibility: the PanelsApi show-* flags drive the shell.
+    // The effective insets here MUST mirror the canvas fit math in
+    // `src/push.rs` (rail/right/log/actions collapse to zero when hidden). ----
+    property <bool> rail-shown: PanelsApi.show-scenes;
+    property <bool> right-shown: PanelsApi.show-audio || PanelsApi.show-chat || PanelsApi.show-stats;
+    property <bool> actions-shown: PanelsApi.show-controls;
+    property <bool> log-shown: PanelsApi.show-event-log;
+
     // ---- Top slim menu bar ----
     Rectangle {
         x: 0;
@@ -161,19 +169,21 @@ export component MainWindow inherits Window {
         y: Theme.topbar-h;
         width: Theme.rail-w;
         height: root.height - Theme.topbar-h;
+        visible: rail-shown;
     }
 
     // ---- Preview canvas area ----
     Rectangle {
-        x: Theme.rail-w;
+        x: rail-shown ? Theme.rail-w : 0px;
         y: Theme.topbar-h;
-        width: root.width - Theme.rail-w - Theme.right-w;
-        height: root.height - Theme.topbar-h - Theme.actions-h - Theme.log-h;
+        width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
+        height: root.height - Theme.topbar-h - (actions-shown ? Theme.actions-h : 0px) - (log-shown ? Theme.log-h : 0px);
+        visible: PanelsApi.show-preview;
         background: Theme.card;
 
         // Letterboxed scene output (geometry pushed from the glue).
         Rectangle {
-            x: Api.canvas-x - Theme.rail-w;
+            x: Api.canvas-x - (rail-shown ? Theme.rail-w : 0px);
             y: Api.canvas-y - Theme.topbar-h;
             width: Api.canvas-width;
             height: Api.canvas-height;
@@ -272,10 +282,11 @@ export component MainWindow inherits Window {
 
     // ---- Quick Actions bar ----
     Rectangle {
-        x: Theme.rail-w;
-        y: root.height - Theme.actions-h - Theme.log-h;
-        width: root.width - Theme.rail-w - Theme.right-w;
+        x: rail-shown ? Theme.rail-w : 0px;
+        y: root.height - Theme.actions-h - (log-shown ? Theme.log-h : 0px);
+        width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
         height: Theme.actions-h;
+        visible: actions-shown;
         background: Theme.card-alt;
 
         HorizontalLayout {
@@ -340,6 +351,7 @@ export component MainWindow inherits Window {
         y: Theme.topbar-h;
         width: Theme.right-w;
         height: root.height - Theme.topbar-h;
+        visible: right-shown;
         background: Theme.card;
 
         TabWidget {
@@ -357,10 +369,11 @@ export component MainWindow inherits Window {
 
     // ---- Event log strip ----
     Rectangle {
-        x: Theme.rail-w;
+        x: rail-shown ? Theme.rail-w : 0px;
         y: root.height - Theme.log-h;
-        width: root.width - Theme.rail-w - Theme.right-w;
+        width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
         height: Theme.log-h;
+        visible: log-shown;
         background: Theme.card;
 
         HorizontalLayout {
