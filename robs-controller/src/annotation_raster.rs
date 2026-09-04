@@ -3,9 +3,9 @@
 //! Used to bake mark-up into recorded frames before they are handed to
 //! FFmpeg. Implements alpha-blended line / arrow / rectangle / ellipse /
 //! freehand-pen / text drawing without any extra dependencies beyond
-//! `ab_glyph` (already a transitive dependency via egui), following the
-//! manual pixel manipulation already used elsewhere in the app (e.g. the
-//! BGRA/RGBA swaps in [`crate::app::RobsApp`]).
+//! `ab_glyph`, following the manual pixel manipulation already used
+//! elsewhere in the engine (e.g. the BGRA/RGBA swaps in the capture
+//! pipeline).
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use robs_core::{Annotation, AnnotationShape};

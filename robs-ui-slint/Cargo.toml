@@ -1,0 +1,21 @@
+[package]
+name = "robs-ui-slint"
+version.workspace = true
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+slint.workspace = true
+robs-controller.workspace = true
+robs-core.workspace = true
+robs-sources.workspace = true
+robs-outputs.workspace = true
+robs-profiles.workspace = true
+robs-chat.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+# Not in workspace deps; mirrors the version `robs-ui` uses.
+rfd = "0.15"
+
+[build-dependencies]
+slint-build.workspace = true

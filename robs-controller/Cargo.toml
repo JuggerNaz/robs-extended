@@ -1,34 +1,24 @@
 [package]
-name = "robs-ui"
+name = "robs-controller"
 version.workspace = true
 edition = "2021"
 
 [dependencies]
-robs-controller.workspace = true
 robs-core.workspace = true
 robs-profiles.workspace = true
 robs-chat.workspace = true
 robs-outputs.workspace = true
 robs-encoding.workspace = true
 robs-sources.workspace = true
-eframe = { version = "0.29", features = ["default"] }
-egui = "0.29"
-ab_glyph = "0.2"
 tokio.workspace = true
-anyhow.workspace = true
-tracing.workspace = true
 parking_lot.workspace = true
-serde.workspace = true
 chrono.workspace = true
-rfd = "0.15"
 image = "0.25"
-thiserror = "1.0"
+ab_glyph = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 rusty-duplication = "0.6"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Threading",
 ] }

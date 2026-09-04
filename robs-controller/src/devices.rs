@@ -1,9 +1,9 @@
 //! OS device enumeration: monitors (GDI), and DirectShow audio/video devices
-//! (via FFmpeg). Extracted verbatim from `app.rs`.
+//! (via FFmpeg).
 
 use super::state::{AudioDeviceInfo, MonitorInfo};
 
-pub(crate) fn get_monitors() -> Vec<MonitorInfo> {
+pub fn get_monitors() -> Vec<MonitorInfo> {
     let mut monitors = Vec::new();
 
     // Use Windows GDI to enumerate display monitors
@@ -78,7 +78,7 @@ pub(crate) fn get_monitors() -> Vec<MonitorInfo> {
     monitors
 }
 
-pub(crate) fn get_audio_devices() -> Vec<AudioDeviceInfo> {
+pub fn get_audio_devices() -> Vec<AudioDeviceInfo> {
     let mut devices = Vec::new();
 
     // Add special options first
@@ -220,7 +220,7 @@ pub(crate) fn get_audio_devices() -> Vec<AudioDeviceInfo> {
 }
 
 /// Enumerate DirectShow video devices (webcams) via FFmpeg.
-pub(crate) fn get_video_devices() -> Vec<String> {
+pub fn get_video_devices() -> Vec<String> {
     let mut devices = Vec::new();
 
     #[cfg(target_os = "windows")]

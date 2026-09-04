@@ -1,0 +1,474 @@
+//! ROBS shell (Phase 1): top menu bar + status chips, Scenes rail, letterboxed
+//! live preview canvas, Quick Actions bar, right tab column (Phase 2 fills the
+//! pages), and the event-log strip.
+//!
+//! All colors/spacing come from `Theme`; all data flows through the frozen
+//! `Api` global. Item geometry and the canvas box are computed in the Rust
+//! glue each tick.
+
+import { Theme } from "theme.slint";
+import { Api } from "api.slint";
+// Re-export so `slint::include_modules!()` exposes the Api global to the
+// Rust glue.
+export { Api }
+import { ScenesRail, MiniTextButton } from "scenes_rail.slint";
+import { SourcesTab } from "sources_tab.slint";
+import { SourcePropertiesDialog } from "source_properties.slint";
+// Re-export so `slint::include_modules!()` exposes the Phase 2 global to the
+// Rust glue as well.
+import { SourcesApi } from "sources_api.slint";
+export { SourcesApi }
+import { PanelsApi } from "panels_api.slint";
+export { PanelsApi }
+import { MenuBar } from "menubar.slint";
+import { AudioTab } from "audio_tab.slint";
+import { ChatTab } from "chat_tab.slint";
+import { StatsTab } from "stats_tab.slint";
+import { SettingsWindow } from "settings.slint";
+import { ListView, TabWidget, Palette } from "std-widgets.slint";
+
+// One Quick Actions bar button: a 56x46 rounded tile with a glyph above a
+// label — the same footprint as the old egui bar, restyled with the theme.
+// With `enabled == false` the button is greyed out and inert but keeps its
+// footprint.
+component QuickButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <color> base;
+    in property <bool> enabled;
+    callback clicked();
+
+    width: 56px;
+    height: 46px;
+    border-radius: Theme.radius-sm;
+    background: !root.enabled ? Theme.border
+        : (touch.has-hover ? root.base.brighter(0.15) : root.base);
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: self.has-hover && root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        y: 3px;
+        width: parent.width;
+        height: 24px;
+        text: root.icon;
+        font-size: 18px;
+        color: root.enabled ? white : Theme.text-dim;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Text {
+        y: 29px;
+        width: parent.width;
+        height: 12px;
+        text: root.label;
+        font-size: Theme.font-xs;
+        color: root.enabled ? white : Theme.text-dim;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Top status chip (LIVE / REC) with an elapsed timer.
+component StatusChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <string> elapsed;
+    in property <color> active-color;
+
+    width: 112px;
+    height: 22px;
+    border-radius: 11px;
+    background: root.active ? root.active-color : transparent;
+    border-width: 1px;
+    border-color: root.active ? root.active-color : Theme.border;
+
+    HorizontalLayout {
+        padding-left: Theme.spacing-sm;
+        padding-right: Theme.spacing-sm;
+        spacing: Theme.spacing-xs;
+        alignment: center;
+
+        Rectangle {
+            width: 7px;
+            height: 7px;
+            border-radius: 3.5px;
+            background: root.active ? white : Theme.text-dim;
+        }
+        Text {
+            text: root.label;
+            font-size: Theme.font-sm;
+            color: root.active ? white : Theme.text-dim;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.elapsed;
+            font-size: Theme.font-sm;
+            color: root.active ? white : Theme.text-dim;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "ROBS";
+    preferred-width: 1280px;
+    preferred-height: 720px;
+    min-width: 800px;
+    min-height: 600px;
+    background: Theme.window;
+
+    init => {
+        Palette.color-scheme = ColorScheme.dark;
+    }
+
+    // ---- View-menu visibility: the PanelsApi show-* flags drive the shell.
+    // The effective insets here MUST mirror the canvas fit math in
+    // `src/push.rs` (rail/right/log/actions collapse to zero when hidden). ----
+    property <bool> rail-shown: PanelsApi.show-scenes;
+    property <bool> right-shown: PanelsApi.show-audio || PanelsApi.show-chat || PanelsApi.show-stats;
+    property <bool> actions-shown: PanelsApi.show-controls;
+    property <bool> log-shown: PanelsApi.show-event-log;
+
+    // ---- Top slim menu bar ----
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: Theme.topbar-h;
+        background: Theme.card;
+
+        HorizontalLayout {
+            x: root.width - 250px;
+            width: 238px;
+            height: parent.height;
+            spacing: Theme.spacing-sm;
+            alignment: end;
+
+            StatusChip {
+                label: "LIVE";
+                active: Api.streaming;
+                elapsed: Api.streaming-time;
+                active-color: Theme.live-red;
+            }
+            StatusChip {
+                label: "REC";
+                active: Api.recording;
+                elapsed: Api.recording-time;
+                active-color: Theme.live-red;
+            }
+        }
+    }
+
+    // ---- Scenes rail (scenes + sources + text overlays) ----
+    ScenesRail {
+        x: 0;
+        y: Theme.topbar-h;
+        width: Theme.rail-w;
+        height: root.height - Theme.topbar-h;
+        visible: rail-shown;
+    }
+
+    // ---- Preview canvas area ----
+    Rectangle {
+        x: rail-shown ? Theme.rail-w : 0px;
+        y: Theme.topbar-h;
+        width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
+        height: root.height - Theme.topbar-h - (actions-shown ? Theme.actions-h : 0px) - (log-shown ? Theme.log-h : 0px);
+        visible: PanelsApi.show-preview;
+        background: Theme.card;
+
+        // Letterboxed scene output (geometry pushed from the glue).
+        Rectangle {
+            x: Api.canvas-x - (rail-shown ? Theme.rail-w : 0px);
+            y: Api.canvas-y - Theme.topbar-h;
+            width: Api.canvas-width;
+            height: Api.canvas-height;
+            background: Theme.canvas-bg;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            for item[i] in Api.scene-items: Rectangle {
+                x: item.x;
+                y: item.y;
+                width: item.width;
+                height: item.height;
+                visible: item.visible;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                // Named placeholder tile until the first frame arrives.
+                if !item.has-frame: Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: Theme.placeholder;
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: item.name;
+                        font-size: Theme.font-sm;
+                        color: Theme.text-dim;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: Api.item-frames[i];
+                }
+                // Source label above the item box (port of the egui label).
+                Text {
+                    x: 0;
+                    y: -16px;
+                    text: item.name;
+                    font-size: Theme.font-sm;
+                    color: #B4B4B4;
+                }
+            }
+
+            if Api.recording: Rectangle {
+                x: 10px;
+                y: 10px;
+                width: 60px;
+                height: 25px;
+                border-radius: Theme.radius-sm;
+                background: Theme.live-red;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "REC";
+                    font-size: 14px;
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            if !Api.scene-present: Text {
+                width: parent.width;
+                height: parent.height;
+                text: "No Active Scene";
+                font-size: 24px;
+                color: Theme.text-dim;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            // Snapshot confirmation toast (fades after ~1.5s).
+            if Api.snapshot-flash: Rectangle {
+                x: (parent.width - 190px) / 2;
+                y: 15px;
+                width: 190px;
+                height: 30px;
+                border-radius: Theme.radius-sm;
+                background: #145A2D;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Snapshot saved";
+                    font-size: Theme.font-md;
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // ---- Quick Actions bar ----
+    Rectangle {
+        x: rail-shown ? Theme.rail-w : 0px;
+        y: root.height - Theme.actions-h - (log-shown ? Theme.log-h : 0px);
+        width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
+        height: Theme.actions-h;
+        visible: actions-shown;
+        background: Theme.card-alt;
+
+        HorizontalLayout {
+            x: Theme.spacing-md;
+            y: (parent.height - 46px) / 2;
+            height: 46px;
+            spacing: Theme.spacing-sm;
+            alignment: start;
+
+            QuickButton {
+                icon: !Api.recording ? "\u{25B6}" : (Api.recording-paused ? "\u{25B6}" : "\u{23F8}");
+                label: !Api.recording ? "START" : (Api.recording-paused ? "RESUME" : "PAUSE");
+                base: !Api.recording ? Theme.success-green
+                    : (Api.recording-paused ? Theme.success-green : Theme.warning-orange);
+                enabled: Api.can-start;
+                clicked => { Api.start-pause-resume-record(); }
+            }
+            QuickButton {
+                icon: "\u{25A0}";
+                label: "STOP";
+                base: Theme.live-red;
+                enabled: true;
+                clicked => { Api.stop-all(); }
+            }
+            Rectangle { width: 1px; background: Theme.border; }
+            QuickButton {
+                icon: !Api.streaming ? "\u{1F4E1}" : (Api.streaming-paused ? "\u{25B6}" : "\u{23F8}");
+                label: !Api.streaming ? "STREAM" : (Api.streaming-paused ? "RESUME" : "PAUSE");
+                base: !Api.streaming ? Theme.accent
+                    : (Api.streaming-paused ? Theme.accent : Theme.warning-orange);
+                enabled: true;
+                clicked => { Api.toggle-stream(); }
+            }
+            Rectangle { width: 1px; background: Theme.border; }
+            QuickButton {
+                icon: "\u{1F4F7}";
+                label: "SNAPSHOT";
+                base: Theme.accent-dim;
+                enabled: Api.can-snapshot;
+                clicked => { Api.snapshot(); }
+            }
+            QuickButton {
+                icon: "\u{2691}";
+                label: "MARK";
+                base: Api.mark-open ? #FFC83C : Theme.warning-orange;
+                enabled: Api.can-mark;
+                clicked => { Api.toggle-clip-mark(); }
+            }
+            QuickButton {
+                icon: "\u{1F516}";
+                label: "BOOKMARK";
+                base: Theme.accent-dim;
+                enabled: true;
+                clicked => { Api.bookmark(); }
+            }
+        }
+    }
+
+    // ---- Right column (tabs — Phase 2 fills the pages) ----
+    Rectangle {
+        x: root.width - Theme.right-w;
+        y: Theme.topbar-h;
+        width: Theme.right-w;
+        height: root.height - Theme.topbar-h;
+        visible: right-shown;
+        background: Theme.card;
+
+        TabWidget {
+            x: Theme.spacing-xs;
+            y: Theme.spacing-xs;
+            width: parent.width - 2 * Theme.spacing-xs;
+            height: parent.height - 2 * Theme.spacing-xs;
+
+            Tab { title: "Sources"; SourcesTab {} }
+            Tab { title: "Audio"; AudioTab {} }
+            Tab { title: "Chat"; ChatTab {} }
+            Tab { title: "Stats"; StatsTab {} }
+        }
+    }
+
+    // ---- Event log strip ----
+    Rectangle {
+        x: rail-shown ? Theme.rail-w : 0px;
+        y: root.height - Theme.log-h;
+        width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
+        height: Theme.log-h;
+        visible: log-shown;
+        background: Theme.card;
+
+        HorizontalLayout {
+            x: Theme.spacing-sm;
+            y: Theme.spacing-xs;
+            width: parent.width - 2 * Theme.spacing-sm;
+            height: 18px;
+            spacing: Theme.spacing-xs;
+            alignment: start;
+
+            Text {
+                text: PanelsApi.log-label;
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+                letter-spacing: 1px;
+                vertical-alignment: center;
+            }
+            Rectangle { }
+            MiniTextButton {
+                width: 52px;
+                height: 18px;
+                label: "CLEAR";
+                tint: Theme.text-dim;
+                clicked => { PanelsApi.clear-log(); }
+            }
+            MiniTextButton {
+                width: 44px;
+                height: 18px;
+                label: "PDF";
+                tint: Theme.text-dim;
+                clicked => { PanelsApi.export-log-pdf(); }
+            }
+        }
+        ListView {
+            x: Theme.spacing-xs;
+            y: 24px;
+            width: parent.width - 2 * Theme.spacing-xs;
+            height: parent.height - 24px - Theme.spacing-xs;
+
+            for line in Api.log-lines: Rectangle {
+                height: 22px;
+                background: transparent;
+
+                HorizontalLayout {
+                    padding-left: Theme.spacing-sm;
+                    padding-right: Theme.spacing-sm;
+                    spacing: Theme.spacing-sm;
+
+                    Text {
+                        width: 64px;
+                        text: line.timestamp;
+                        font-size: Theme.font-xs;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        width: 76px;
+                        text: line.kind;
+                        font-size: Theme.font-xs;
+                        color: line.kind == "record" ? Theme.warning-orange
+                            : (line.kind == "stream" ? Theme.accent-hover : Theme.text-dim);
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: line.message;
+                        font-size: Theme.font-xs;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Menu bar overlay (dropdowns extend over the regions below; the
+    // click-away backdrop only exists while a menu is open) ----
+    MenuBar {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+
+        new-profile => { PanelsApi.new-profile(); }
+        settings-opened => { PanelsApi.open-settings(); }
+        exit-app => { PanelsApi.exit-app(); }
+        undo => { PanelsApi.undo(); }
+        redo => { PanelsApi.redo(); }
+        about => { PanelsApi.about(); }
+        select-profile(index) => { PanelsApi.select-profile(index); }
+    }
+
+    // ---- Settings window (self-hides unless PanelsApi.settings-open) ----
+    SettingsWindow { }
+
+    // ---- Source-properties modal (topmost; hidden unless open) ----
+    SourcePropertiesDialog { }
+}

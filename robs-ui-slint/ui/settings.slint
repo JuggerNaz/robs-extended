@@ -1,0 +1,706 @@
+//! Settings window: the port of the egui settings dialog
+//! (`robs-ui/src/app/settings.rs`). A modal card over a dimming backdrop
+//! with a left tab column and eight pages. Every editable field binds
+//! two-way to a `PanelsApi.cfg-*` property; the glue seeds them when the
+//! window opens and applies edits back on its tick. Closing (X button) is
+//! the commit gesture — it triggers `settings-closed`, which persists the
+//! anomaly settings like the egui app does.
+
+import { Theme } from "theme.slint";
+import { PanelsApi } from "panels_api.slint";
+import { CheckBox, ComboBox, LineEdit, Slider, SpinBox } from "std-widgets.slint";
+
+// ---- Small building blocks ----
+
+component Heading inherits Text {
+    height: 26px;
+    vertical-alignment: center;
+    font-size: Theme.font-lg;
+    color: Theme.text;
+}
+
+component Note inherits Text {
+    wrap: word-wrap;
+    font-size: Theme.font-xs;
+    color: Theme.text-dim;
+}
+
+component Separator inherits Rectangle {
+    height: 1px;
+    background: Theme.border;
+}
+
+// One settings grid row: fixed-width label + arbitrary widgets.
+component CfgRow inherits HorizontalLayout {
+    in property <string> label;
+    spacing: Theme.spacing-sm;
+
+    Text {
+        width: 150px;
+        text: root.label;
+        font-size: Theme.font-sm;
+        color: Theme.text-dim;
+        vertical-alignment: center;
+    }
+    @children
+}
+
+component TabItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback selected();
+
+    height: 26px;
+    border-radius: Theme.radius-sm;
+    background: root.active ? Theme.accent-dim
+        : (touch.has-hover ? Theme.card-alt : transparent);
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.selected(); }
+    }
+    Text {
+        x: Theme.spacing-sm;
+        width: parent.width - Theme.spacing-sm;
+        height: parent.height;
+        text: root.label;
+        font-size: Theme.font-sm;
+        color: root.active ? white : Theme.text-dim;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// Accent-filled action button (Apply & restart, Start/Stop buffer, Browse...).
+// Unlike MiniTextButton this one supports an `enabled` state.
+component ActionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 26px;
+    border-radius: Theme.radius-sm;
+    background: !root.enabled ? Theme.border
+        : (touch.has-hover ? Theme.accent-hover : Theme.accent);
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: self.has-hover && root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        font-size: Theme.font-sm;
+        color: root.enabled ? white : Theme.text-dim;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Status line next to a "Status:" label; state: 0 neutral / 1 good / 2 warn.
+component StatusText inherits Text {
+    in property <int> state;
+    height: 22px;
+    vertical-alignment: center;
+    font-size: Theme.font-sm;
+    color: root.state == 1 ? Theme.success-green
+        : (root.state == 2 ? Theme.warning-orange : Theme.text);
+}
+
+// ---- Pages ----
+
+component GeneralPage inherits VerticalLayout {
+    spacing: Theme.spacing-sm;
+    Heading { text: "General"; }
+    Separator { }
+    CfgRow {
+        label: "Language:";
+        ActionButton { label: "English"; width: 90px; enabled: false; }
+    }
+    CfgRow {
+        label: "Theme:";
+        ActionButton { label: "Dark"; width: 90px; enabled: false; }
+    }
+    CfgRow {
+        label: "Confirm on exit:";
+        CheckBox { checked <=> PanelsApi.cfg-confirm-on-exit; }
+    }
+    CfgRow {
+        label: "Minimize to tray:";
+        CheckBox { checked <=> PanelsApi.cfg-minimize-to-tray; }
+    }
+    CfgRow {
+        label: "Always on top:";
+        CheckBox { checked <=> PanelsApi.cfg-always-on-top; }
+    }
+    CfgRow {
+        label: "Check for updates:";
+        CheckBox { checked <=> PanelsApi.cfg-check-for-updates; }
+    }
+    CfgRow {
+        label: "Filename formatting:";
+        LineEdit {
+            width: 220px;
+            text <=> PanelsApi.cfg-filename-formatting;
+        }
+    }
+}
+
+component VideoPage inherits VerticalLayout {
+    spacing: Theme.spacing-sm;
+    Heading { text: "Video"; }
+    Separator { }
+    CfgRow {
+        label: "Base Resolution (Canvas):";
+        HorizontalLayout {
+            spacing: Theme.spacing-xs;
+            SpinBox { width: 90px; minimum: 640; maximum: 7680; value <=> PanelsApi.cfg-base-width; }
+            Text { text: "x"; width: 14px; color: Theme.text-dim; vertical-alignment: center; }
+            SpinBox { width: 90px; minimum: 480; maximum: 4320; value <=> PanelsApi.cfg-base-height; }
+        }
+    }
+    CfgRow {
+        label: "Output (Scaled) Resolution:";
+        HorizontalLayout {
+            spacing: Theme.spacing-xs;
+            SpinBox { width: 90px; minimum: 640; maximum: 7680; value <=> PanelsApi.cfg-output-width; }
+            Text { text: "x"; width: 14px; color: Theme.text-dim; vertical-alignment: center; }
+            SpinBox { width: 90px; minimum: 480; maximum: 4320; value <=> PanelsApi.cfg-output-height; }
+        }
+    }
+    CfgRow {
+        label: "Downscale Filter:";
+        ActionButton { label: "Lanczos"; width: 90px; enabled: false; }
+    }
+    CfgRow {
+        label: "FPS Type:";
+        ActionButton { label: "Integer"; width: 90px; enabled: false; }
+    }
+    CfgRow {
+        label: "FPS:";
+        Slider { width: 180px; minimum: 1; maximum: 120; value <=> PanelsApi.cfg-fps; }
+    }
+    Separator { }
+    Note {
+        text: "Note: Base Resolution is your capture canvas size. Output Resolution is what gets encoded.";
+    }
+}
+
+component AudioPage inherits VerticalLayout {
+    spacing: Theme.spacing-sm;
+    Heading { text: "Audio"; }
+    Separator { }
+    CfgRow {
+        label: "Sample Rate:";
+        ComboBox {
+            width: 160px;
+            model: ["44.1 kHz", "48 kHz"];
+            current-index <=> PanelsApi.cfg-sample-rate-index;
+        }
+    }
+    CfgRow {
+        label: "Channels:";
+        ComboBox {
+            width: 160px;
+            model: ["Mono", "Stereo"];
+            current-index <=> PanelsApi.cfg-channel-mode-index;
+        }
+    }
+    CfgRow {
+        label: "Desktop Audio:";
+        ComboBox {
+            width: 240px;
+            model: PanelsApi.audio-device-labels;
+            current-index <=> PanelsApi.cfg-desktop-device-index;
+        }
+    }
+    CfgRow {
+        label: "Mic/Aux:";
+        ComboBox {
+            width: 240px;
+            model: PanelsApi.audio-device-labels;
+            current-index <=> PanelsApi.cfg-mic-device-index;
+        }
+    }
+}
+
+component HotkeysPage inherits VerticalLayout {
+    spacing: Theme.spacing-sm;
+    Heading { text: "Hotkeys"; }
+    Separator { }
+    Note { text: "Hotkey configuration coming soon."; }
+}
+
+component StreamingPage inherits VerticalLayout {
+    spacing: Theme.spacing-sm;
+    Heading { text: "Streaming"; }
+    Separator { }
+    CfgRow {
+        label: "Service:";
+        ComboBox {
+            width: 160px;
+            model: ["YouTube", "Twitch", "Custom..."];
+            current-value <=> PanelsApi.cfg-stream-service;
+            selected(value) => {
+                // Picking a known service swaps in its ingest server; Custom
+                // keeps the current server for hand-editing (egui parity).
+                if (value == "YouTube") {
+                    PanelsApi.cfg-stream-server = "rtmp://a.rtmp.youtube.com/live2";
+                }
+                if (value == "Twitch") {
+                    PanelsApi.cfg-stream-server = "rtmp://live.twitch.tv/app";
+                }
+            }
+        }
+    }
+    CfgRow {
+        label: "Server:";
+        LineEdit { width: 240px; text <=> PanelsApi.cfg-stream-server; }
+    }
+    CfgRow {
+        label: "Stream Key:";
+        LineEdit { width: 240px; input-type: password; text <=> PanelsApi.cfg-stream-key; }
+    }
+    CfgRow {
+        label: "Video Encoder:";
+        ComboBox {
+            width: 240px;
+            model: PanelsApi.video-encoders;
+            current-value <=> PanelsApi.cfg-video-encoder;
+        }
+    }
+    CfgRow {
+        label: "Audio Encoder:";
+        ComboBox {
+            width: 240px;
+            model: PanelsApi.audio-encoders;
+            current-value <=> PanelsApi.cfg-audio-encoder;
+        }
+    }
+    CfgRow {
+        label: "Bitrate:";
+        Slider { width: 180px; minimum: 1000; maximum: 20000; value <=> PanelsApi.cfg-stream-bitrate; }
+    }
+    CfgRow {
+        label: "Rate Control:";
+        ActionButton { label: "CBR"; width: 90px; enabled: false; }
+    }
+    CfgRow {
+        label: "Keyframe Interval:";
+        Slider { width: 180px; minimum: 0; maximum: 20; value <=> PanelsApi.cfg-keyframe-interval; }
+    }
+    CfgRow {
+        label: "Preset:";
+        ActionButton { label: "faster"; width: 90px; enabled: false; }
+    }
+    Separator { }
+    Note {
+        text: "YouTube key: YouTube Studio \u{2192} Go live \u{2192} Stream key. Twitch key: Settings \u{2192} Stream \u{2192} Primary Stream key.";
+    }
+    Separator { }
+    HorizontalLayout {
+        spacing: Theme.spacing-md;
+        height: 22px;
+        Text {
+            text: "Encoder Status:";
+            font-size: Theme.font-sm;
+            font-weight: 700;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        Text {
+            text: PanelsApi.ffmpeg-ok ? "FFmpeg OK" : "FFmpeg not found";
+            color: PanelsApi.ffmpeg-ok ? Theme.success-green : Theme.live-red;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+        Text {
+            text: PanelsApi.nvenc-ok ? "NVENC OK" : "NVENC not available";
+            color: PanelsApi.nvenc-ok ? Theme.success-green : Theme.warning-orange;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+        Text {
+            text: PanelsApi.aac-ok ? "AAC OK" : "AAC not available";
+            color: PanelsApi.aac-ok ? Theme.success-green : Theme.warning-orange;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component OutputsPage inherits VerticalLayout {
+    spacing: Theme.spacing-sm;
+    Heading { text: "Outputs"; }
+    Separator { }
+    Heading { text: "Recording"; }
+    Separator { }
+    CfgRow {
+        label: "Type:";
+        ActionButton { label: "Standard"; width: 90px; enabled: false; }
+    }
+    CfgRow {
+        label: "Format:";
+        ComboBox {
+            width: 120px;
+            model: ["mp4", "mkv", "flv", "mov"];
+            current-value <=> PanelsApi.cfg-recording-format;
+        }
+    }
+    CfgRow {
+        label: "Video Encoder:";
+        ComboBox {
+            width: 240px;
+            model: PanelsApi.video-encoders;
+            current-value <=> PanelsApi.cfg-video-encoder;
+        }
+    }
+    CfgRow {
+        label: "Audio Encoder:";
+        ComboBox {
+            width: 240px;
+            model: PanelsApi.audio-encoders;
+            current-value <=> PanelsApi.cfg-audio-encoder;
+        }
+    }
+    CfgRow {
+        label: "Bitrate:";
+        Slider { width: 180px; minimum: 1000; maximum: 50000; value <=> PanelsApi.cfg-recording-bitrate; }
+    }
+    CfgRow {
+        label: "Path:";
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+            Text {
+                width: 150px;
+                text: PanelsApi.cfg-recording-path == "" ? "(not set)" : PanelsApi.cfg-recording-path;
+                font-size: Theme.font-sm;
+                color: PanelsApi.cfg-recording-path == "" ? Theme.text-dim : Theme.text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            ActionButton {
+                label: "Browse...";
+                width: 90px;
+                clicked => { PanelsApi.browse-recording-path(); }
+            }
+        }
+    }
+}
+
+component BlackboxPage inherits VerticalLayout {
+    spacing: Theme.spacing-sm;
+    Heading { text: "Blackbox Safety Recorder"; }
+    Separator { }
+    Note {
+        text: "Always-on background recorder. Runs independently of the Record button whenever a capture source is active, writing rotating Matroska segments for crash-safe recovery.";
+    }
+    CfgRow {
+        label: "Enable:";
+        CheckBox {
+            text: "Enable blackbox recorder";
+            checked <=> PanelsApi.cfg-bb-enabled;
+        }
+    }
+    CfgRow {
+        label: "Encoder:";
+        ComboBox {
+            width: 240px;
+            model: ["libx264 (software)", "h264_nvenc (NVIDIA hardware)"];
+            current-index <=> PanelsApi.cfg-bb-encoder-index;
+        }
+    }
+    CfgRow {
+        label: "Output directory:";
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+            Text {
+                width: 150px;
+                text: PanelsApi.cfg-bb-output-dir == "" ? "(recording path / Blackbox)" : PanelsApi.cfg-bb-output-dir;
+                font-size: Theme.font-sm;
+                color: PanelsApi.cfg-bb-output-dir == "" ? Theme.text-dim : Theme.text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            ActionButton {
+                label: "Browse...";
+                width: 90px;
+                clicked => { PanelsApi.browse-bb-dir(); }
+            }
+        }
+    }
+    CfgRow {
+        label: "Segment length:";
+        Slider { width: 180px; minimum: 60; maximum: 3600; value <=> PanelsApi.cfg-bb-segment-secs; }
+    }
+    CfgRow {
+        label: "Segment size cap:";
+        Slider { width: 180px; minimum: 64; maximum: 4096; value <=> PanelsApi.cfg-bb-segment-mb; }
+    }
+    CfgRow {
+        label: "CRF (x264):";
+        Slider { width: 180px; minimum: 0; maximum: 51; value <=> PanelsApi.cfg-bb-crf; }
+    }
+    CfgRow {
+        label: "Bitrate (nvenc):";
+        Slider { width: 180px; minimum: 500; maximum: 50000; value <=> PanelsApi.cfg-bb-bitrate; }
+    }
+    CfgRow {
+        label: "Disk low warning:";
+        Slider { width: 180px; minimum: 5; maximum: 50; value <=> PanelsApi.cfg-bb-disk-warn; }
+    }
+    CfgRow {
+        label: "Disk critical pause:";
+        Slider { width: 180px; minimum: 1; maximum: 20; value <=> PanelsApi.cfg-bb-disk-critical; }
+    }
+    CfgRow {
+        label: "Max retention:";
+        Slider { width: 180px; minimum: 0; maximum: 200; value <=> PanelsApi.cfg-bb-retention; }
+    }
+    CfgRow {
+        label: "Stall threshold:";
+        Slider { width: 180px; minimum: 1; maximum: 120; value <=> PanelsApi.cfg-bb-stall; }
+    }
+    Separator { }
+    HorizontalLayout {
+        spacing: Theme.spacing-sm;
+        height: 28px;
+        Text {
+            text: "Status:";
+            font-size: Theme.font-sm;
+            font-weight: 700;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        StatusText {
+            text: PanelsApi.bb-status;
+            state: PanelsApi.bb-status-state;
+            horizontal-stretch: 1;
+        }
+        ActionButton {
+            label: "Apply & restart recorder";
+            width: 170px;
+            enabled: PanelsApi.bb-engine-running;
+            clicked => { PanelsApi.restart-blackbox(); }
+        }
+    }
+    if PanelsApi.bb-last-error != "": Note {
+        text: "Last error: " + PanelsApi.bb-last-error;
+        color: #C85A5A;
+    }
+    Note {
+        text: "Most changes take effect on the next capture start. Toggling Enable applies immediately. Container is fixed to mkv for crash-safety.";
+    }
+}
+
+component AnomalyPage inherits VerticalLayout {
+    spacing: Theme.spacing-sm;
+    Heading { text: "Anomaly Clip Capture"; }
+    Separator { }
+    Note {
+        text: "A user-toggled rolling buffer. Start it, then hit Capture Clip to export a short MP4 spanning the pre- and post-roll window around the trigger. Independent of the main recording and the Blackbox recorder.";
+    }
+    CfgRow {
+        label: "Encoder:";
+        ComboBox {
+            width: 240px;
+            model: ["libx264 (software)", "h264_nvenc (NVIDIA hardware)"];
+            current-index <=> PanelsApi.cfg-an-encoder-index;
+        }
+    }
+    CfgRow {
+        label: "Output directory:";
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+            Text {
+                width: 150px;
+                text: PanelsApi.cfg-an-output-dir == "" ? "(recording path / Anomaly)" : PanelsApi.cfg-an-output-dir;
+                font-size: Theme.font-sm;
+                color: PanelsApi.cfg-an-output-dir == "" ? Theme.text-dim : Theme.text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            ActionButton {
+                label: "Browse...";
+                width: 90px;
+                clicked => { PanelsApi.browse-an-dir(); }
+            }
+        }
+    }
+    CfgRow {
+        label: "Pre-roll:";
+        Slider { width: 180px; minimum: 1; maximum: 120; value <=> PanelsApi.cfg-an-pre-roll; }
+    }
+    CfgRow {
+        label: "Post-roll:";
+        Slider { width: 180px; minimum: 1; maximum: 120; value <=> PanelsApi.cfg-an-post-roll; }
+    }
+    CfgRow {
+        label: "Segment length:";
+        Slider { width: 180px; minimum: 1; maximum: 10; value <=> PanelsApi.cfg-an-segment-secs; }
+    }
+    CfgRow {
+        label: "Max buffer size:";
+        Slider { width: 180px; minimum: 64; maximum: 4096; value <=> PanelsApi.cfg-an-max-buffer; }
+    }
+    CfgRow {
+        label: "CRF (x264):";
+        Slider { width: 180px; minimum: 0; maximum: 51; value <=> PanelsApi.cfg-an-crf; }
+    }
+    CfgRow {
+        label: "Bitrate (nvenc):";
+        Slider { width: 180px; minimum: 500; maximum: 50000; value <=> PanelsApi.cfg-an-bitrate; }
+    }
+    CfgRow {
+        label: "Clip prefix:";
+        LineEdit { width: 180px; text <=> PanelsApi.cfg-an-clip-prefix; }
+    }
+    CfgRow {
+        label: "Clip suffix:";
+        LineEdit { width: 180px; text <=> PanelsApi.cfg-an-clip-suffix; }
+    }
+    CfgRow {
+        label: "Capture-clip hotkey:";
+        LineEdit { width: 180px; text <=> PanelsApi.cfg-an-hotkey; }
+    }
+    Separator { }
+    HorizontalLayout {
+        spacing: Theme.spacing-sm;
+        height: 28px;
+        ActionButton {
+            label: PanelsApi.an-engine-running ? "Stop buffer" : "Start buffer";
+            width: 120px;
+            clicked => { PanelsApi.toggle-anomaly-engine(); }
+        }
+        ActionButton {
+            label: "Capture clip now";
+            width: 150px;
+            enabled: PanelsApi.an-can-capture;
+            clicked => { PanelsApi.capture-anomaly-clip(); }
+        }
+    }
+    HorizontalLayout {
+        spacing: Theme.spacing-sm;
+        height: 22px;
+        Text {
+            text: "Status:";
+            font-size: Theme.font-sm;
+            font-weight: 700;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        StatusText {
+            text: PanelsApi.an-status;
+            state: PanelsApi.an-status-state;
+        }
+    }
+    if PanelsApi.an-last-error != "": Note {
+        text: "Last error: " + PanelsApi.an-last-error;
+        color: #C85A5A;
+    }
+    Note {
+        text: "Exported clips use the MP4 container (stream-copy, no re-encode). v1 exports one clip at a time.";
+    }
+}
+
+// ---- Window ----
+
+export component SettingsWindow inherits Rectangle {
+    background: transparent;
+
+    if PanelsApi.settings-open: Rectangle {
+        width: 100%;
+        height: 100%;
+
+        // Dimming backdrop; clicks here are swallowed (egui kept focus on
+        // the window and only the X closed it).
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #00000099;
+            TouchArea { clicked => { } }
+        }
+
+        card := Rectangle {
+            width: 660px;
+            height: 470px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.card;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            property <int> active-tab: 0;
+
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                HorizontalLayout {
+                    height: 26px;
+                    spacing: Theme.spacing-sm;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Settings";
+                        font-size: Theme.font-lg;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                    ActionButton {
+                        label: "\u{2715}";
+                        width: 28px;
+                        clicked => { PanelsApi.settings-closed(); }
+                    }
+                }
+                Separator { }
+
+                HorizontalLayout {
+                    spacing: Theme.spacing-md;
+
+                    // Left tab column.
+                    VerticalLayout {
+                        width: 140px;
+                        spacing: 2px;
+                        TabItem { label: "General"; active: card.active-tab == 0; selected => { card.active-tab = 0; } }
+                        TabItem { label: "Video"; active: card.active-tab == 1; selected => { card.active-tab = 1; } }
+                        TabItem { label: "Audio"; active: card.active-tab == 2; selected => { card.active-tab = 2; } }
+                        TabItem { label: "Hotkeys"; active: card.active-tab == 3; selected => { card.active-tab = 3; } }
+                        TabItem { label: "Streaming"; active: card.active-tab == 4; selected => { card.active-tab = 4; } }
+                        TabItem { label: "Outputs"; active: card.active-tab == 5; selected => { card.active-tab = 5; } }
+                        TabItem { label: "Blackbox"; active: card.active-tab == 6; selected => { card.active-tab = 6; } }
+                        TabItem { label: "Anomaly"; active: card.active-tab == 7; selected => { card.active-tab = 7; } }
+                    }
+
+                    // Right content pane.
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        Flickable {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            viewport-height: page.preferred-height;
+
+                            page := VerticalLayout {
+                                width: parent.width - 12px;
+                                spacing: Theme.spacing-sm;
+
+                                if card.active-tab == 0: GeneralPage { }
+                                if card.active-tab == 1: VideoPage { }
+                                if card.active-tab == 2: AudioPage { }
+                                if card.active-tab == 3: HotkeysPage { }
+                                if card.active-tab == 4: StreamingPage { }
+                                if card.active-tab == 5: OutputsPage { }
+                                if card.active-tab == 6: BlackboxPage { }
+                                if card.active-tab == 7: AnomalyPage { }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,8 +1,8 @@
 //! Left-hand Scenes + Sources panel (add/remove capture sources, text overlays,
 //! per-item context menu). Extracted verbatim from `app.rs`.
 
-use super::super::devices::{get_monitors, get_video_devices};
-use super::super::state::EventLogKind;
+use robs_controller::devices::{get_monitors, get_video_devices};
+use robs_controller::state::EventLogKind;
 use super::super::RobsApp;
 use eframe::egui;
 use robs_core::scene::CaptureSource;
@@ -246,25 +246,37 @@ impl RobsApp {
                                 // Context menu: Remove, Properties
                                 response.context_menu(|ui| {
                                     if ui.button("Properties").clicked() {
-                                        // Load source properties into editing fields
-                                        if let Some(scene) = self.scenes.get_mut(&name) {
-                                            if let Some(item) = scene.item_mut(id) {
-                                                self.editing.editing_source_id = Some(id);
-                                                self.editing.editing_source_name = item.name().to_string();
-                                                let pos = item.position();
-                                                let scale = item.scale();
-                                                let crop = item.crop();
-                                                self.editing.editing_source_pos_x = pos.x;
-                                                self.editing.editing_source_pos_y = pos.y;
-                                                self.editing.editing_source_scale_x = scale.x;
-                                                self.editing.editing_source_scale_y = scale.y;
-                                                self.editing.editing_source_rotation = item.rotation();
-                                                self.editing.editing_source_crop_left = crop.left;
-                                                self.editing.editing_source_crop_top = crop.top;
-                                                self.editing.editing_source_crop_right = crop.right;
-                                                self.editing.editing_source_crop_bottom = crop.bottom;
-                                                self.editing.show_source_properties = true;
-                                            }
+                                        // Load source properties into editing fields.
+                                        // Snapshot the item through the scene borrow
+                                        // first, then write: `scenes` and `editing`
+                                        // are both reached through the controller
+                                        // deref, so the two borrows cannot overlap.
+                                        let props = self
+                                            .scenes
+                                            .get_mut(&name)
+                                            .and_then(|scene| scene.item_mut(id))
+                                            .map(|item| {
+                                                (
+                                                    item.name().to_string(),
+                                                    item.position(),
+                                                    item.scale(),
+                                                    item.rotation(),
+                                                    item.crop(),
+                                                )
+                                            });
+                                        if let Some((item_name, pos, scale, rotation, crop)) = props {
+                                            self.editing.editing_source_id = Some(id);
+                                            self.editing.editing_source_name = item_name;
+                                            self.editing.editing_source_pos_x = pos.x;
+                                            self.editing.editing_source_pos_y = pos.y;
+                                            self.editing.editing_source_scale_x = scale.x;
+                                            self.editing.editing_source_scale_y = scale.y;
+                                            self.editing.editing_source_rotation = rotation;
+                                            self.editing.editing_source_crop_left = crop.left;
+                                            self.editing.editing_source_crop_top = crop.top;
+                                            self.editing.editing_source_crop_right = crop.right;
+                                            self.editing.editing_source_crop_bottom = crop.bottom;
+                                            self.editing.show_source_properties = true;
                                         }
                                         ui.close_menu();
                                     }

@@ -1,13 +1,13 @@
 //! Desktop/window/webcam preview capture and frame delivery to the recording
 //! pipeline.
 
-use super::RobsApp;
+use super::RobsController;
 use crate::dxgi_capture::DxgiCaptureManager;
-use eframe::egui;
+use crate::state::PreviewFrame;
 use robs_core::scene::CaptureSource;
 use robs_core::types::SceneItemId;
 
-impl RobsApp {
+impl RobsController {
     pub(crate) fn start_preview_capture(&mut self) {
         if self.preview.preview_capture_active {
             return;
@@ -173,7 +173,7 @@ impl RobsApp {
     /// playback (the fast-forward-recording bug): when a UI tick produced no
     /// fresh frame (static screen, DXGI timeout, webcam lag), the previous
     /// frame is repeated instead.
-    fn resend_last_output_frame(&mut self, ctx: &egui::Context) {
+    fn resend_last_output_frame(&mut self) {
         let recording_active = self.record.recording
             && !self.record.recording_paused
             && self.record.recording_frame_sender.is_some();
@@ -191,7 +191,7 @@ impl RobsApp {
                     Ok(_) => self.record.frame_count += 1,
                     Err(e) => {
                         eprintln!("[DXGI-Record] Duplicate send failed: {e}, stopping recording");
-                        self.stop_recording(ctx);
+                        self.stop_recording();
                         return;
                     }
                 }
@@ -207,13 +207,13 @@ impl RobsApp {
         }
     }
 
-    pub(crate) fn process_preview_frames(&mut self, ctx: &egui::Context) {
+    pub(crate) fn process_preview_frames(&mut self) {
         // Limit preview capture to target FPS to avoid excessive CPU usage
-        // from BGRA->RGBA conversion and texture upload. Encoder pacing is
+        // from BGRA->RGBA conversion and frame storage. Encoder pacing is
         // NOT gated here — see `resend_last_output_frame` below.
         let target_frame_interval = std::time::Duration::from_secs_f32(1.0 / self.fps_setting);
         if self.preview.last_preview_capture.elapsed() < target_frame_interval {
-            self.resend_last_output_frame(ctx);
+            self.resend_last_output_frame();
             return;
         }
         self.preview.last_preview_capture = std::time::Instant::now();
@@ -239,7 +239,7 @@ impl RobsApp {
                 self.preview.preview_capture_active = false;
                 eprintln!("[Preview] No capture sources, stopping preview");
             }
-            self.resend_last_output_frame(ctx);
+            self.resend_last_output_frame();
             return;
         }
 
@@ -303,22 +303,20 @@ impl RobsApp {
                     chunk.swap(0, 2);
                 }
 
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [width as usize, height as usize],
-                    &rgba_data,
+                // Store the raw RGBA frame for the view layer to upload; the
+                // version bump lets it skip re-uploading a frame it already
+                // consumed (the former in-place texture update).
+                let version = self.preview.next_frame_version;
+                self.preview.next_frame_version = self.preview.next_frame_version.wrapping_add(1);
+                self.preview.preview_frames.insert(
+                    texture_key,
+                    PreviewFrame {
+                        data: rgba_data.clone(),
+                        width,
+                        height,
+                        version,
+                    },
                 );
-
-                // Reuse existing texture or create a new one
-                if let Some(texture) = self.preview.preview_textures.get_mut(&texture_key) {
-                    texture.set(color_image, egui::TextureOptions::LINEAR);
-                } else {
-                    let texture = ctx.load_texture(
-                        format!("preview_{:?}", texture_key),
-                        color_image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.preview.preview_textures.insert(texture_key, texture);
-                }
 
                 // RECORDING / STREAMING: reuse the captured frame (no double
                 // capture - both encoders tap into the same frame preview
@@ -348,7 +346,7 @@ impl RobsApp {
                                         eprintln!(
                                             "[DXGI-Record] Channel send failed: {e}, stopping recording"
                                         );
-                                        self.stop_recording(ctx);
+                                        self.stop_recording();
                                     }
                                 }
                             }
@@ -371,11 +369,11 @@ impl RobsApp {
             }
         }
 
-        // Clean up textures, hwnd mappings, and webcam captures for sources that no longer exist
+        // Clean up frames, hwnd mappings, and webcam captures for sources that no longer exist
         let active_ids: std::collections::HashSet<SceneItemId> =
             capture_items.iter().map(|(id, _)| *id).collect();
         self.preview
-            .preview_textures
+            .preview_frames
             .retain(|id, _| active_ids.contains(id));
         self.window_hwnds.retain(|id, _| active_ids.contains(id));
         self.webcam_captures.retain(|id, _| active_ids.contains(id));
@@ -384,7 +382,7 @@ impl RobsApp {
         // DXGI timed out on an unchanged screen), repeat the last one so the
         // encoders' constant-framerate stream stays wall-clock paced. A
         // no-op when fresh frames were sent (the pacer is not due).
-        self.resend_last_output_frame(ctx);
+        self.resend_last_output_frame();
     }
 
     /// Scale captured frame to output resolution (OBS-style: preview matches output)

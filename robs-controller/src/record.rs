@@ -2,7 +2,7 @@
 
 use super::clips::ClipMark;
 use super::state::EventLogKind;
-use super::RobsApp;
+use super::RobsController;
 use robs_core::scene::CaptureSource;
 use std::fs;
 use std::path::PathBuf;
@@ -17,17 +17,17 @@ pub(crate) fn gop_size(fps: f32, keyframe_interval: u32) -> u32 {
     ((fps * keyframe_interval as f32) as u32).max(1)
 }
 
-impl RobsApp {
+impl RobsController {
     /// True when the current scene contains at least one source. Recording
     /// is refused otherwise — without a source the pipeline would silently
     /// fall back to desktop capture.
-    pub(crate) fn scene_has_sources(&self) -> bool {
+    pub fn scene_has_sources(&self) -> bool {
         self.scenes
             .current_scene()
             .is_some_and(|scene| scene.item_count() > 0)
     }
 
-    pub(crate) fn start_recording(&mut self) {
+    pub fn start_recording(&mut self) {
         // Refuse to record an empty scene: every record button greys out,
         // and this guard backs them up for any other callers.
         if !self.scene_has_sources() {
@@ -445,7 +445,7 @@ impl RobsApp {
         );
     }
 
-    pub(crate) fn stop_recording(&mut self, ctx: &eframe::egui::Context) {
+    pub fn stop_recording(&mut self) {
         eprintln!("[Recording] Stopping recording...");
 
         // 1. Signal the writer thread to stop
@@ -533,7 +533,7 @@ impl RobsApp {
                     EventLogKind::Record,
                 );
                 let path = self.record.last_recording_path.clone();
-                self.start_clip_exports(path, clip_marks, self.fps_setting, ctx);
+                self.start_clip_exports(path, clip_marks, self.fps_setting);
             } else {
                 self.log_event(
                     "Recording finalized abnormally; clip marks skipped \u{2014} file may be unplayable",

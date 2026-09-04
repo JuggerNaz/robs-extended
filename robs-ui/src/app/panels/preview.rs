@@ -1,7 +1,7 @@
 //! Central preview panel: scene-item rendering, drag/resize, annotation overlay,
 //! and the quick-actions bar. Extracted verbatim from `app.rs`.
 
-use super::super::state::EventLogKind;
+use robs_controller::state::EventLogKind;
 use super::super::RobsApp;
 use eframe::egui;
 use robs_core::scene::{CaptureSource, Position, Scale};
@@ -123,7 +123,7 @@ impl RobsApp {
                         );
 
                         // Draw source content - look up texture by SceneItemId
-                        if let Some(texture) = self.preview.preview_textures.get(&id) {
+                        if let Some(texture) = self.preview_textures.get(&id) {
                             ui.painter().image(
                                 texture.id(),
                                 item_rect,
@@ -330,7 +330,7 @@ impl RobsApp {
                             && (self.record.recording || self.streaming)
                         {
                             if self.record.recording {
-                                self.stop_recording(ui.ctx());
+                                self.stop_recording();
                             }
                             if self.streaming {
                                 self.stop_streaming();

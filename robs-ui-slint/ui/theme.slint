@@ -1,0 +1,48 @@
+//! ROBS dark studio theme. The whole look lives here: surfaces, accent and
+//! status colors, text colors, radii, the 4/8/12 spacing grid, and font sizes.
+
+export global Theme {
+    // Surfaces (near-black, layered cards).
+    out property <color> window: #141414;
+    out property <color> card: #1E1E1E;
+    out property <color> card-alt: #232323;
+    out property <color> border: #3C3C3C;
+    out property <color> canvas-bg: #000000;
+    out property <color> placeholder: #3C2850;
+
+    // Accent + status colors.
+    out property <color> accent: #5E4AC0;
+    out property <color> accent-hover: #6E58D4;
+    out property <color> accent-dim: #4A3A9A;
+    out property <color> live-red: #E34040;
+    out property <color> success-green: #40B440;
+    out property <color> warning-orange: #DC8C14;
+
+    // Text.
+    out property <color> text: #EDEDED;
+    out property <color> text-dim: #8A8A8A;
+
+    // Radii.
+    out property <length> radius: 8px;
+    out property <length> radius-sm: 4px;
+
+    // Spacing grid (4/8/12).
+    out property <length> spacing-xs: 4px;
+    out property <length> spacing-sm: 8px;
+    out property <length> spacing-md: 12px;
+
+    // Font sizes.
+    out property <length> font-xs: 9px;
+    out property <length> font-sm: 11px;
+    out property <length> font-md: 13px;
+    out property <length> font-lg: 16px;
+    out property <length> font-xl: 22px;
+
+    // Shell layout. These constants are mirrored in `src/push.rs`
+    // (`layout` module) — keep the two in sync.
+    out property <length> topbar-h: 40px;
+    out property <length> rail-w: 220px;
+    out property <length> right-w: 300px;
+    out property <length> actions-h: 52px;
+    out property <length> log-h: 110px;
+}

@@ -1,0 +1,63 @@
+//! Frozen Phase 1 view contract between the Rust glue and the Slint markup.
+//!
+//! Phase 2 consumes this file as-is: only ADDITIVE changes are permitted, and
+//! contract changes go through the lead.
+
+export struct SceneItemView {
+    id: int,
+    name: string,
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    visible: bool,
+    has-frame: bool,
+}
+
+export struct LogLineView {
+    timestamp: string,
+    kind: string,
+    message: string,
+}
+
+export global Api {
+    // ---- Commands (UI -> glue) ----
+    callback start-pause-resume-record();
+    callback stop-all();
+    callback toggle-stream();
+    callback snapshot();
+    callback toggle-clip-mark();
+    callback bookmark();
+    callback select-scene(string);
+
+    // ---- View models (glue -> UI) ----
+    in property <[SceneItemView]> scene-items;
+    // Preview frames parallel to `scene-items` by index (empty when the item
+    // has no fresh frame yet).
+    in property <[image]> item-frames;
+    in property <[string]> scene-names;
+    in property <string> selected-scene;
+    in property <[LogLineView]> log-lines;
+
+    // ---- Status snapshot (glue -> UI) ----
+    in property <bool> scene-present;
+    in property <bool> recording;
+    in property <bool> recording-paused;
+    in property <string> recording-time;
+    in property <bool> streaming;
+    in property <bool> streaming-paused;
+    in property <string> streaming-time;
+
+    // Quick-action enablement (exact parity with the old egui bar).
+    in property <bool> can-start;
+    in property <bool> can-snapshot;
+    in property <bool> can-mark;
+    in property <bool> mark-open;
+    in property <bool> snapshot-flash;
+
+    // Letterboxed canvas geometry, in window coordinates (computed in Rust).
+    in property <length> canvas-x;
+    in property <length> canvas-y;
+    in property <length> canvas-width;
+    in property <length> canvas-height;
+}

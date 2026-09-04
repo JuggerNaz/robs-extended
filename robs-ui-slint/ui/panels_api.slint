@@ -1,0 +1,157 @@
+//! Phase 2 (batch B) view contract: audio mixer, chat, stats, the settings
+//! window, the menu bar, and the event-log strip actions. Additive to the
+//! frozen `Api` global in `api.slint` and the batch A `SourcesApi` — nothing
+//! there is modified.
+//!
+//! Editable settings are `in-out` so the widgets can bind two-way; the glue
+//! seeds them from the engine and applies drift back on every tick. Paths
+//! that only change via Browse dialogs are read-only `in` properties the
+//! glue pushes when the engine value moves.
+
+export struct AudioChannelView {
+    index: int,
+    name: string,
+    volume: float,
+    muted: bool,
+    pct: string,
+}
+
+export struct ChatMessageView {
+    author: string,
+    color: color,
+    text: string,
+}
+
+export global PanelsApi {
+    // ---- Commands (UI -> glue) ----
+    callback set-audio-volume(int, float);
+    callback set-audio-muted(int, bool);
+    callback send-chat(string);
+    callback clear-log();
+    callback export-log-pdf();
+    callback open-settings();
+    // Closing the settings window is the app's settings-commit gesture.
+    callback settings-closed();
+    // Folder pickers (Outputs / Blackbox / Anomaly output dirs).
+    callback browse-recording-path();
+    callback browse-bb-dir();
+    callback browse-an-dir();
+    callback restart-blackbox();
+    callback toggle-anomaly-engine();
+    callback capture-anomaly-clip();
+    callback new-profile();
+    callback select-profile(int);
+    callback exit-app();
+    callback about();
+    callback undo();
+    callback redo();
+
+    // ---- View models (glue -> UI) ----
+    in property <[AudioChannelView]> audio-channels;
+    in property <[ChatMessageView]> chat-messages;
+    in property <[string]> profile-names;
+    // Audio-device picker entries; indexes address the glue's device list.
+    in property <[string]> audio-device-labels;
+    in property <[string]> video-encoders;
+    in property <[string]> audio-encoders;
+    // "EVENT LOG (N)" strip header label, formatted in the glue.
+    in property <string> log-label;
+
+    // ---- View toggles (View menu; state mirrors the egui flags) ----
+    in-out property <bool> show-preview;
+    in-out property <bool> show-scenes;
+    in-out property <bool> show-controls;
+    in-out property <bool> show-audio;
+    in-out property <bool> show-chat;
+    in-out property <bool> show-stats;
+    in-out property <bool> show-event-log;
+    in-out property <bool> show-annotations;
+
+    // ---- Stats tab (formatted in the glue, egui parity) ----
+    in property <string> stats-streaming;
+    in property <string> stats-recording;
+    in property <string> stats-duration;
+    in property <string> stats-fps;
+    in property <string> stats-bitrate;
+    in property <string> stats-dropped;
+
+    // ---- Encoder availability (Streaming tab status row) ----
+    in property <bool> ffmpeg-ok;
+    in property <bool> nvenc-ok;
+    in property <bool> aac-ok;
+
+    // ---- Blackbox / Anomaly live status (settings tabs) ----
+    in property <string> bb-status;
+    // 0 = neutral, 1 = good (green), 2 = warning (orange).
+    in property <int> bb-status-state;
+    in property <string> bb-last-error;
+    in property <bool> bb-engine-running;
+    in property <string> an-status;
+    in property <int> an-status-state;
+    in property <string> an-last-error;
+    in property <bool> an-engine-running;
+    in property <bool> an-can-capture;
+
+    // ---- Settings window ----
+    in-out property <bool> settings-open;
+
+    // General
+    in-out property <bool> cfg-confirm-on-exit;
+    in-out property <bool> cfg-minimize-to-tray;
+    in-out property <bool> cfg-always-on-top;
+    in-out property <bool> cfg-check-for-updates;
+    in-out property <string> cfg-filename-formatting;
+
+    // Video
+    in-out property <int> cfg-base-width;
+    in-out property <int> cfg-base-height;
+    in-out property <int> cfg-output-width;
+    in-out property <int> cfg-output-height;
+    in-out property <float> cfg-fps;
+
+    // Audio (combobox indexes; the glue maps them to the engine strings)
+    in-out property <int> cfg-sample-rate-index;
+    in-out property <int> cfg-channel-mode-index;
+    in-out property <int> cfg-desktop-device-index;
+    in-out property <int> cfg-mic-device-index;
+
+    // Streaming
+    in-out property <string> cfg-stream-service;
+    in-out property <string> cfg-stream-server;
+    in-out property <string> cfg-stream-key;
+    in-out property <string> cfg-video-encoder;
+    in-out property <string> cfg-audio-encoder;
+    in-out property <float> cfg-stream-bitrate;
+    in-out property <float> cfg-keyframe-interval;
+
+    // Outputs (format/encoders/bitrate are in-out; path arrives via Browse)
+    in-out property <string> cfg-recording-format;
+    in-out property <float> cfg-recording-bitrate;
+    in property <string> cfg-recording-path;
+
+    // Blackbox
+    in-out property <bool> cfg-bb-enabled;
+    in-out property <int> cfg-bb-encoder-index;
+    in property <string> cfg-bb-output-dir;
+    in-out property <float> cfg-bb-segment-secs;
+    in-out property <float> cfg-bb-segment-mb;
+    in-out property <float> cfg-bb-crf;
+    in-out property <float> cfg-bb-bitrate;
+    in-out property <float> cfg-bb-disk-warn;
+    in-out property <float> cfg-bb-disk-critical;
+    in-out property <float> cfg-bb-retention;
+    in-out property <float> cfg-bb-stall;
+
+    // Anomaly
+    in-out property <int> cfg-an-encoder-index;
+    in property <string> cfg-an-output-dir;
+    in-out property <float> cfg-an-pre-roll;
+    in-out property <float> cfg-an-post-roll;
+    in-out property <float> cfg-an-segment-secs;
+    in-out property <float> cfg-an-max-buffer;
+    in-out property <float> cfg-an-crf;
+    in-out property <float> cfg-an-bitrate;
+    in-out property <string> cfg-an-clip-prefix;
+    in-out property <string> cfg-an-clip-suffix;
+    in-out property <string> cfg-an-hotkey;
+}

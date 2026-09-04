@@ -1,6 +1,7 @@
 //! Bottom streaming-controls strip (scene name + LIVE/REC status). Extracted
 //! verbatim from `app.rs`, minus a stray debug label that did not belong here.
 
+use robs_controller::RobsController;
 use super::super::RobsApp;
 use eframe::egui;
 
@@ -27,7 +28,7 @@ impl RobsApp {
                                 egui::RichText::new("\u{25CF} LIVE").color(egui::Color32::RED)
                             };
                             ui.label(live_text);
-                            ui.label(Self::format_time(self.streaming_time / 1000));
+                            ui.label(RobsController::format_time(self.streaming_time / 1000));
                         }
                         if self.record.recording {
                             let rec_text = if self.record.recording_paused {
@@ -37,7 +38,7 @@ impl RobsApp {
                                 egui::RichText::new("\u{25CF} REC").color(egui::Color32::RED)
                             };
                             ui.label(rec_text);
-                            ui.label(Self::format_time(self.record.recording_time / 1000));
+                            ui.label(RobsController::format_time(self.record.recording_time / 1000));
                             // Clip-mark badge: bright while a mark is open, dim
                             // with the queued count otherwise.
                             if self.record.clip_mark_start.is_some() {

@@ -1,0 +1,447 @@
+//! Left rail: scenes (add/remove/select), the compact source manager
+//! (add-source picker, per-row visibility + actions), and text overlays.
+//! Ports the egui `scenes_panel` (`robs-ui/src/app/panels/scenes.rs`) onto
+//! the Phase 1 shell's rail region. `SourceRow`, `IconButton` and
+//! `MiniTextButton` are reused by the roomier Sources tab.
+
+import { Theme } from "theme.slint";
+import { Api } from "api.slint";
+import { SourcesApi, SourceRowView, OverlayView } from "sources_api.slint";
+import { ListView, LineEdit } from "std-widgets.slint";
+
+// Tiny square glyph button used across the rail rows.
+export component IconButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> enabled: true;
+    in property <color> tint: Theme.text-dim;
+    callback clicked();
+
+    width: 22px;
+    height: 22px;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover && root.enabled ? Theme.border : transparent;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: self.has-hover && root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.glyph;
+        font-size: 11px;
+        color: root.enabled ? root.tint : Theme.border;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Tiny text button (properties / move / remove actions, Add overlay).
+export component MiniTextButton inherits Rectangle {
+    in property <string> label;
+    in property <color> tint: Theme.text;
+    callback clicked();
+
+    height: 24px;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover ? Theme.border : Theme.card-alt;
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        font-size: Theme.font-xs;
+        color: root.tint;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Section label (SCENES / SOURCES / TEXT OVERLAYS).
+component SectionLabel inherits Text {
+    height: 24px;
+    vertical-alignment: center;
+    font-size: Theme.font-xs;
+    color: Theme.text-dim;
+    letter-spacing: 1px;
+}
+
+// One entry of an add-source picker list.
+export component PickerRow inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+
+    height: 22px;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover ? Theme.accent-dim : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        x: Theme.spacing-sm;
+        width: parent.width - 2 * Theme.spacing-sm;
+        height: parent.height;
+        text: root.label;
+        font-size: Theme.font-sm;
+        color: Theme.text;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// Toggle chip for the add-source picker mode.
+component ModeChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+
+    horizontal-stretch: 1;
+    height: 22px;
+    border-radius: 11px;
+    background: root.active ? Theme.accent : Theme.card-alt;
+    border-width: 1px;
+    border-color: root.active ? Theme.accent-hover : Theme.border;
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        font-size: Theme.font-xs;
+        color: root.active ? white : Theme.text-dim;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// One source of the current scene: visibility toggle, elided name, and a
+// "..." action row (properties / move up / move down / remove) — the port of
+// the egui per-item context menu.
+export component SourceRow inherits Rectangle {
+    in property <SourceRowView> source;
+    callback toggle-visible(bool);
+    callback properties();
+    callback move-up();
+    callback move-down();
+    callback remove();
+
+    property <bool> menu-open;
+
+    height: root.menu-open ? 60px : 30px;
+    border-radius: Theme.radius-sm;
+    background: row-touch.has-hover ? Theme.card-alt : transparent;
+
+    row-touch := TouchArea { width: 100%; height: 100%; }
+    VerticalLayout {
+        HorizontalLayout {
+            height: 30px;
+            spacing: Theme.spacing-xs;
+
+            IconButton {
+                glyph: root.source.visible ? "\u{25CF}" : "\u{25CB}";
+                tint: root.source.visible ? Theme.accent-hover : Theme.text-dim;
+                clicked => { root.toggle-visible(!root.source.visible); }
+            }
+            Text {
+                horizontal-stretch: 1;
+                height: parent.height;
+                text: root.source.name;
+                font-size: Theme.font-sm;
+                color: root.source.visible ? Theme.text : Theme.text-dim;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            IconButton {
+                glyph: "\u{2026}";
+                tint: Theme.text;
+                clicked => { root.menu-open = !root.menu-open; }
+            }
+        }
+        if root.menu-open: HorizontalLayout {
+            height: 26px;
+            padding-left: 28px;
+            spacing: Theme.spacing-xs;
+
+            MiniTextButton {
+                label: "PROPS";
+                clicked => { root.menu-open = false; root.properties(); }
+            }
+            MiniTextButton {
+                label: "\u{2191}";
+                clicked => { root.move-up(); }
+            }
+            MiniTextButton {
+                label: "\u{2193}";
+                clicked => { root.move-down(); }
+            }
+            MiniTextButton {
+                label: "\u{2715}";
+                tint: Theme.live-red;
+                clicked => { root.menu-open = false; root.remove(); }
+            }
+        }
+    }
+}
+
+export component ScenesRail inherits Rectangle {
+    background: Theme.card;
+
+    property <bool> add-open: false;
+    // 0 = display, 1 = window, 2 = camera.
+    property <int> picker-mode: 0;
+    property <string> overlay-draft;
+
+    function commit-overlay() {
+        // The glue ignores empty/whitespace input.
+        SourcesApi.add-overlay(root.overlay-draft);
+        root.overlay-draft = "";
+    }
+
+    VerticalLayout {
+        padding: Theme.spacing-xs;
+        spacing: Theme.spacing-xs;
+
+        // ---- Scenes ----
+        HorizontalLayout {
+            height: 24px;
+            spacing: Theme.spacing-xs;
+
+            SectionLabel { text: "SCENES"; horizontal-stretch: 1; }
+            IconButton { glyph: "+"; tint: Theme.text; clicked => { SourcesApi.add-scene(); } }
+            IconButton { glyph: "\u{2212}"; tint: Theme.text; clicked => { SourcesApi.remove-scene(); } }
+        }
+        Rectangle {
+            vertical-stretch: 2;
+            min-height: 72px;
+
+            ListView {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+
+                for name in Api.scene-names: Rectangle {
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    background: name == Api.selected-scene ? Theme.accent
+                        : (scene-touch.has-hover ? Theme.card-alt : transparent);
+
+                    scene-touch := TouchArea {
+                        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+                        clicked => { Api.select-scene(name); }
+                    }
+                    Text {
+                        x: Theme.spacing-sm;
+                        width: parent.width - 2 * Theme.spacing-sm;
+                        height: parent.height;
+                        text: name;
+                        font-size: Theme.font-sm;
+                        color: name == Api.selected-scene ? white : Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.border; }
+
+        // ---- Sources (only meaningful with a scene) ----
+        if Api.scene-present: VerticalLayout {
+            height: 218px;
+            spacing: Theme.spacing-xs;
+
+            HorizontalLayout {
+                height: 24px;
+                spacing: Theme.spacing-xs;
+
+                SectionLabel { text: "SOURCES"; horizontal-stretch: 1; }
+                IconButton {
+                    glyph: root.add-open ? "\u{2212}" : "+";
+                    tint: Theme.text;
+                    clicked => { root.add-open = !root.add-open; }
+                }
+            }
+
+            if root.add-open: VerticalLayout {
+                height: 122px;
+                spacing: Theme.spacing-xs;
+
+                HorizontalLayout {
+                    height: 22px;
+                    spacing: Theme.spacing-xs;
+
+                    ModeChip { label: "Display"; active: root.picker-mode == 0; clicked => { root.picker-mode = 0; } }
+                    ModeChip { label: "Window"; active: root.picker-mode == 1; clicked => { root.picker-mode = 1; } }
+                    ModeChip { label: "Camera"; active: root.picker-mode == 2; clicked => { root.picker-mode = 2; } }
+                }
+
+                Rectangle {
+                    height: 96px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.card-alt;
+
+                    if root.picker-mode == 0 && SourcesApi.monitor-names.length == 0: Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "No monitors detected";
+                        font-size: Theme.font-sm;
+                        color: Theme.text-dim;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if root.picker-mode == 0 && SourcesApi.monitor-names.length > 0: ListView {
+                        x: Theme.spacing-xs;
+                        y: Theme.spacing-xs;
+                        width: parent.width - 2 * Theme.spacing-xs;
+                        height: parent.height - 2 * Theme.spacing-xs;
+
+                        for m[i] in SourcesApi.monitor-names: PickerRow {
+                            label: m;
+                            clicked => { SourcesApi.add-display-source(i); }
+                        }
+                    }
+                    if root.picker-mode == 1 && SourcesApi.window-names.length == 0: Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "No windows found";
+                        font-size: Theme.font-sm;
+                        color: Theme.text-dim;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if root.picker-mode == 1 && SourcesApi.window-names.length > 0: ListView {
+                        x: Theme.spacing-xs;
+                        y: Theme.spacing-xs;
+                        width: parent.width - 2 * Theme.spacing-xs;
+                        height: parent.height - 2 * Theme.spacing-xs;
+
+                        for w[i] in SourcesApi.window-names: PickerRow {
+                            label: w;
+                            clicked => { SourcesApi.add-window-source(i); }
+                        }
+                    }
+                    if root.picker-mode == 2 && SourcesApi.camera-names.length == 0: Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "No webcam devices found";
+                        font-size: Theme.font-sm;
+                        color: Theme.text-dim;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if root.picker-mode == 2 && SourcesApi.camera-names.length > 0: ListView {
+                        x: Theme.spacing-xs;
+                        y: Theme.spacing-xs;
+                        width: parent.width - 2 * Theme.spacing-xs;
+                        height: parent.height - 2 * Theme.spacing-xs;
+
+                        for cam in SourcesApi.camera-names: PickerRow {
+                            label: cam;
+                            clicked => { SourcesApi.add-webcam-source(cam); }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+
+                ListView {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+
+                    for r in SourcesApi.source-rows: SourceRow {
+                        source: r;
+                        toggle-visible(v) => { SourcesApi.set-source-visible(r.id, v); }
+                        properties => { SourcesApi.source-properties(r.id); }
+                        move-up => { SourcesApi.move-source-up(r.id); }
+                        move-down => { SourcesApi.move-source-down(r.id); }
+                        remove => { SourcesApi.remove-source(r.id); }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.border; }
+
+        // ---- Text overlays ----
+        if Api.scene-present: VerticalLayout {
+            vertical-stretch: 1;
+            min-height: 88px;
+            spacing: Theme.spacing-xs;
+
+            SectionLabel { text: "TEXT OVERLAYS"; }
+            HorizontalLayout {
+                height: 28px;
+                spacing: Theme.spacing-xs;
+
+                LineEdit {
+                    horizontal-stretch: 1;
+                    height: 28px;
+                    placeholder-text: "Overlay text...";
+                    text <=> root.overlay-draft;
+                    accepted(text) => { root.commit-overlay(); }
+                }
+                MiniTextButton {
+                    width: 44px;
+                    label: "Add";
+                    clicked => { root.commit-overlay(); }
+                }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+
+                ListView {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+
+                    for ov in SourcesApi.overlays: Rectangle {
+                        height: 28px;
+                        border-radius: Theme.radius-sm;
+                        background: ov-touch.has-hover ? Theme.card-alt : transparent;
+
+                        ov-touch := TouchArea { width: 100%; height: 100%; }
+                        HorizontalLayout {
+                            spacing: Theme.spacing-xs;
+
+                            IconButton {
+                                glyph: ov.visible ? "\u{25CF}" : "\u{25CB}";
+                                tint: ov.visible ? Theme.accent-hover : Theme.text-dim;
+                                clicked => { SourcesApi.set-overlay-visible(ov.id, !ov.visible); }
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                height: parent.height;
+                                text: ov.text;
+                                font-size: Theme.font-sm;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            IconButton {
+                                glyph: "\u{2715}";
+                                tint: Theme.live-red;
+                                clicked => { SourcesApi.remove-overlay(ov.id); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

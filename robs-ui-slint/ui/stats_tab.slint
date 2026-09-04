@@ -1,0 +1,64 @@
+//! Stats tab: session stats grid (streaming / recording / duration / fps /
+//! bitrate / dropped frames) — the port of the egui `Stats` section. Values
+//! are preformatted strings pushed by the glue each tick.
+
+import { Theme } from "theme.slint";
+import { PanelsApi } from "panels_api.slint";
+
+component StatRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> show: true;
+
+    spacing: Theme.spacing-sm;
+    height: 20px;
+
+    Text {
+        width: 110px;
+        text: root.label;
+        font-size: Theme.font-sm;
+        color: Theme.text-dim;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.value;
+        font-size: Theme.font-sm;
+        color: Theme.text;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+export component StatsTab inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-sm;
+
+        StatRow {
+            label: "Streaming:";
+            value: PanelsApi.stats-streaming;
+        }
+        StatRow {
+            label: "Recording:";
+            value: PanelsApi.stats-recording;
+        }
+        if PanelsApi.stats-duration != "": StatRow {
+            label: "Duration:";
+            value: PanelsApi.stats-duration;
+        }
+        StatRow {
+            label: "Frame Rate:";
+            value: PanelsApi.stats-fps;
+        }
+        StatRow {
+            label: "Bitrate:";
+            value: PanelsApi.stats-bitrate;
+        }
+        StatRow {
+            label: "Dropped Frames:";
+            value: PanelsApi.stats-dropped;
+        }
+    }
+}
