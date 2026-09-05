@@ -10,11 +10,18 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::{Api, LogLineView, MainWindow, PanelsApi, SceneItemView};
+use crate::canvas_glue::{ann_bbox, path_commands, tool_index, TEXT_FONT_SIZE};
+use crate::{
+    AnnotationView, Api, CanvasApi, CanvasTextView, LogLineView, MainWindow, PanelsApi,
+    SceneItemView,
+};
 use robs_controller::state::{EventLogEntry, EventLogKind, PreviewFrame};
 use robs_controller::RobsController;
-use robs_core::SceneItemId;
-use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use robs_core::{AnnotationShape, SceneItemId};
+use slint::{
+    Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString,
+    VecModel,
+};
 
 /// Event-log rows pushed to the UI (the tail of the controller's 200-entry
 /// ring).
@@ -33,6 +40,9 @@ pub mod layout {
     pub const RIGHT_W: f32 = 300.0;
     pub const ACTIONS_H: f32 = 52.0;
     pub const LOG_H: f32 = 110.0;
+    /// Annotation toolbar strip height — mirrors `ui/theme.slint`
+    /// (`annotations-h`).
+    pub const TOOLBAR_H: f32 = 36.0;
 }
 
 /// Handles to the models installed in `Api`, plus mirrors of the last pushed
@@ -48,6 +58,48 @@ pub struct PushedState {
     names_mirror: Vec<String>,
     /// `event_log.len()` at the last push.
     log_len: usize,
+    /// Canvas geometry from the last push; canvas-relative pointer events
+    /// convert to scene units through `scale` (see `canvas_glue`).
+    pub canvas: CanvasGeom,
+    /// Signature of the last pushed annotation model.
+    ann_mirror: Vec<AnnSig>,
+    /// Signature of the last pushed overlay model.
+    overlay_mirror: Vec<OverlaySig>,
+    /// Editing-active at the previous push (seeds `text-input` on rising edge).
+    editing_prev: bool,
+}
+
+/// Canvas fit scale from the last push (scene units per canvas pixel;
+/// computed by [`push_state`] each tick). Pointer events arrive
+/// canvas-relative, so only the scale is needed to convert them.
+#[derive(Clone, Copy)]
+pub struct CanvasGeom {
+    pub scale: f32,
+}
+
+/// Change-detection signature of one pushed annotation row.
+#[derive(Clone, PartialEq)]
+struct AnnSig {
+    id: i32,
+    commands: String,
+    stroke: [u8; 4],
+    stroke_width: f32,
+    filled: bool,
+    is_text: bool,
+    text: String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+}
+
+/// Change-detection signature of one pushed overlay row.
+#[derive(Clone, PartialEq)]
+struct OverlaySig {
+    id: i32,
+    text: String,
+    color: [u8; 4],
+    x: f32,
+    y: f32,
 }
 
 struct ItemMirror {
@@ -82,6 +134,10 @@ impl PushedState {
             frame_versions: HashMap::new(),
             names_mirror: Vec::new(),
             log_len: 0,
+            canvas: CanvasGeom { scale: 1.0 },
+            ann_mirror: Vec::new(),
+            overlay_mirror: Vec::new(),
+            editing_prev: false,
         }
     }
 }
@@ -147,10 +203,13 @@ pub fn push_state(
     let right_w = if right_shown { layout::RIGHT_W } else { 0.0 };
     let actions_h = if panels.get_show_controls() { layout::ACTIONS_H } else { 0.0 };
     let log_h = if panels.get_show_event_log() { layout::LOG_H } else { 0.0 };
+    // The annotation toolbar inserts a strip below the top bar while shown
+    // (mirrors `annot-shift` in `ui/mainwindow.slint`).
+    let toolbar_h = if panels.get_show_annotations() { layout::TOOLBAR_H } else { 0.0 };
     let area_x = rail_w;
-    let area_y = layout::TOPBAR_H;
+    let area_y = layout::TOPBAR_H + toolbar_h;
     let area_w = (win_w - rail_w - right_w).max(1.0);
-    let area_h = (win_h - layout::TOPBAR_H - actions_h - log_h).max(1.0);
+    let area_h = (win_h - layout::TOPBAR_H - toolbar_h - actions_h - log_h).max(1.0);
 
     let scale_x = area_w / scene_w as f32;
     let scale_y = area_h / scene_h as f32;
@@ -164,6 +223,7 @@ pub fn push_state(
     api.set_canvas_y(canvas_y);
     api.set_canvas_width(canvas_w);
     api.set_canvas_height(canvas_h);
+    pushed.canvas = CanvasGeom { scale: canvas_scale };
 
     // ---- Scene items: geometry rows + frames ----
     // Build the desired row/mirror state for every item (scene data was
@@ -315,6 +375,198 @@ pub fn push_state(
             .snapshot_flash
             .map_or(false, |t| t.elapsed() < SNAPSHOT_FLASH),
     );
+
+    // ---- Phase 3: CanvasApi snapshot ----
+    push_canvas(
+        &component.global::<CanvasApi>(),
+        controller,
+        pushed,
+        scene_w,
+        scene_h,
+        canvas_scale,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: CanvasApi snapshot
+// ---------------------------------------------------------------------------
+
+/// Push the `CanvasApi` snapshot: toolbar mirrors, committed annotations as
+/// Path commands (scene coordinates; the markup's viewbox letterboxes them),
+/// the in-progress drawing, the selection outline, on-canvas text overlays,
+/// and the inline-editor state. Mirror-compared like the other per-tick
+/// models. Shared geometry helpers live in `canvas_glue`.
+fn push_canvas(
+    api: &CanvasApi,
+    controller: &mut RobsController,
+    pushed: &mut PushedState,
+    scene_w: u32,
+    scene_h: u32,
+    scale: f32,
+) {
+    let ann = &controller.annotation;
+    let font_px = (TEXT_FONT_SIZE * scale).max(8.0);
+
+    // ---- Toolbar mirrors ----
+    api.set_scene_width(scene_w as f32);
+    api.set_scene_height(scene_h as f32);
+    api.set_tool(tool_index(ann.annotation_tool));
+    let style = ann.annotation_style;
+    api.set_stroke_color(Color::from_argb_u8(
+        style.color[3],
+        style.color[0],
+        style.color[1],
+        style.color[2],
+    ));
+    api.set_fill_enabled(
+        ann.annotation_tool.shape().map(|s| s.is_closed()).unwrap_or(false),
+    );
+    api.set_filled(style.filled);
+    // Items stop being draggable while a drawing tool is active (egui
+    // `draw_active` parity).
+    api.set_draw_active(ann.show_annotations && ann.annotation_tool.shape().is_some());
+    // The slider is two-way; only write back on drift so user edits survive.
+    if (api.get_stroke_width() - style.stroke_width).abs() > 0.01 {
+        api.set_stroke_width(style.stroke_width);
+    }
+
+    // ---- Committed annotations ----
+    let mut sigs: Vec<AnnSig> = Vec::with_capacity(ann.annotations.len());
+    let mut rows: Vec<AnnotationView> = Vec::with_capacity(ann.annotations.len());
+    for annotation in &ann.annotations {
+        if !annotation.is_visible() {
+            continue;
+        }
+        // Each annotation snapshots the toolbar style at creation time.
+        let ann_style = annotation.style();
+        let start = annotation.start();
+        let sig = AnnSig {
+            id: annotation.id().0 .0 as i32,
+            commands: path_commands(annotation, scale),
+            stroke: ann_style.color,
+            stroke_width: ann_style.stroke_width,
+            filled: ann_style.filled,
+            is_text: annotation.shape() == AnnotationShape::Text,
+            text: annotation.text().to_string(),
+            x: start.x * scale,
+            y: start.y * scale,
+            font_size: font_px,
+        };
+        rows.push(AnnotationView {
+            id: sig.id,
+            commands: sig.commands.as_str().into(),
+            stroke: Color::from_argb_u8(
+                sig.stroke[3],
+                sig.stroke[0],
+                sig.stroke[1],
+                sig.stroke[2],
+            ),
+            stroke_width: sig.stroke_width,
+            filled: sig.filled,
+            is_text: sig.is_text,
+            text: sig.text.as_str().into(),
+            x: sig.x,
+            y: sig.y,
+            font_size: sig.font_size,
+            selected: ann.selected_annotation == Some(annotation.id()),
+        });
+        sigs.push(sig);
+    }
+    if sigs != pushed.ann_mirror {
+        pushed.ann_mirror = sigs;
+        api.set_annotations(ModelRc::new(VecModel::from(rows)));
+    }
+
+    // ---- In-progress drawing ----
+    match &ann.annotation_drawing {
+        Some(drawing) => {
+            let drawing_style = drawing.style();
+            api.set_drawing(AnnotationView {
+                id: drawing.id().0 .0 as i32,
+                commands: path_commands(drawing, scale).into(),
+                stroke: Color::from_argb_u8(
+                    drawing_style.color[3],
+                    drawing_style.color[0],
+                    drawing_style.color[1],
+                    drawing_style.color[2],
+                ),
+                stroke_width: drawing_style.stroke_width,
+                filled: drawing_style.filled,
+                is_text: false,
+                text: "".into(),
+                x: 0.0,
+                y: 0.0,
+                font_size: 0.0,
+                selected: false,
+            });
+            api.set_drawing_active(true);
+        }
+        None => api.set_drawing_active(false),
+    }
+
+    // ---- Selection outline (canvas px; the markup expands it by 4px) ----
+    let sel_rect = ann
+        .selected_annotation
+        .and_then(|sel| ann.annotations.iter().find(|a| a.id() == sel))
+        .and_then(|sel_ann| ann_bbox(sel_ann, scale));
+    match sel_rect {
+        Some((x, y, w, h)) => {
+            api.set_has_selection(true);
+            api.set_sel_x(x);
+            api.set_sel_y(y);
+            api.set_sel_width(w);
+            api.set_sel_height(h);
+        }
+        None => api.set_has_selection(false),
+    }
+
+    // ---- Text overlays ----
+    let mut overlay_sigs: Vec<OverlaySig> = Vec::new();
+    let mut overlay_rows: Vec<CanvasTextView> = Vec::new();
+    for overlay in controller.text_overlays.iter().filter(|o| o.is_visible()) {
+        let pos = overlay.position();
+        let sig = OverlaySig {
+            id: overlay.id().0 as i32,
+            text: overlay.text().to_string(),
+            color: overlay.color(),
+            x: pos.x * scale,
+            y: pos.y * scale,
+        };
+        overlay_rows.push(CanvasTextView {
+            id: sig.id,
+            text: sig.text.as_str().into(),
+            x: sig.x,
+            y: sig.y,
+            font_size: (overlay.font_size() * scale).max(8.0),
+        });
+        overlay_sigs.push(sig);
+    }
+    if overlay_sigs != pushed.overlay_mirror {
+        pushed.overlay_mirror = overlay_sigs;
+        api.set_text_overlays(ModelRc::new(VecModel::from(overlay_rows)));
+    }
+
+    // ---- Inline text editor ----
+    let editing = ann
+        .editing_text_id
+        .and_then(|id| ann.annotations.iter().find(|a| a.id() == id))
+        .map(|edited| {
+            let start = edited.start();
+            (start.x * scale, start.y * scale)
+        });
+    match editing {
+        Some((x, y)) => {
+            api.set_editing(true);
+            api.set_edit_x(x);
+            api.set_edit_y(y);
+            if !pushed.editing_prev {
+                // Rising edge: seed the two-way LineEdit buffer.
+                api.set_text_input(ann.text_input.as_str().into());
+            }
+        }
+        None => api.set_editing(false),
+    }
+    pushed.editing_prev = editing.is_some();
 }
 
 /// RGBA preview frame -> Slint image (straight alpha, unmultiplied).

@@ -1,0 +1,213 @@
+//! Phase 3: annotation toolbar + the canvas editing layer pieces.
+//!
+//! The toolbar is a 36px strip shown directly below the menu bar while
+//! `PanelsApi.show-annotations` is enabled — the port of the egui
+//! `annotation_toolbar` (`robs-ui/src/app/annotations.rs`). One DEVIATION
+//! from egui: stroke color is picked from eight preset swatches because the
+//! Slint widget set has no color picker.
+//!
+//! The canvas-side pieces (`ResizeHandle`, `OverlayLabel`) are pure visuals:
+//! all hit-testing and dragging run through the single canvas TouchArea in
+//! `mainwindow.slint`, which forwards pointer events to the glue.
+
+import { Theme } from "theme.slint";
+import { CanvasApi, CanvasTextView } from "canvas_api.slint";
+import { MiniTextButton } from "scenes_rail.slint";
+import { CheckBox, Slider } from "std-widgets.slint";
+
+// One tool toggle in the toolbar: glyph + label, highlighted while active.
+component ToolButton inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label;
+    in property <int> tool-id;
+    in property <int> active-tool;
+
+    height: 26px;
+    border-radius: Theme.radius-sm;
+    background: root.active-tool == root.tool-id ? Theme.accent
+        : (touch.has-hover ? Theme.card-alt : transparent);
+    border-width: 1px;
+    border-color: root.active-tool == root.tool-id ? Theme.accent-hover : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { CanvasApi.set-tool(root.tool-id); }
+    }
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        spacing: 3px;
+        alignment: center;
+
+        Text {
+            text: root.glyph;
+            font-size: Theme.font-sm;
+            color: root.active-tool == root.tool-id ? white : Theme.text;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            font-size: Theme.font-xs;
+            color: root.active-tool == root.tool-id ? white : Theme.text-dim;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One preset stroke-color swatch; the active one gets a white ring.
+component Swatch inherits Rectangle {
+    in property <color> swatch;
+    in property <color> active-color;
+
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    background: root.swatch;
+    border-width: root.active-color == root.swatch ? 2px : 1px;
+    border-color: root.active-color == root.swatch ? white : Theme.border;
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { CanvasApi.set-stroke-color(root.swatch); }
+    }
+}
+
+// Toolbar separator.
+component Sep inherits Rectangle {
+    width: 1px;
+    height: 20px;
+    background: Theme.border;
+}
+
+export component AnnotationToolbar inherits Rectangle {
+    background: Theme.card-alt;
+    height: Theme.annotations-h;
+
+    HorizontalLayout {
+        x: Theme.spacing-sm;
+        width: parent.width - 2 * Theme.spacing-sm;
+        spacing: Theme.spacing-sm;
+        alignment: start;
+
+        // ---- Tools: Select first, then the drawable shapes ----
+        ToolButton { glyph: "\u{2316}"; label: "Select"; tool-id: 0; active-tool: CanvasApi.tool; }
+        ToolButton { glyph: "\u{2192}"; label: "Arrow"; tool-id: 1; active-tool: CanvasApi.tool; }
+        ToolButton { glyph: "/"; label: "Line"; tool-id: 2; active-tool: CanvasApi.tool; }
+        ToolButton { glyph: "\u{25A0}"; label: "Rect"; tool-id: 3; active-tool: CanvasApi.tool; }
+        ToolButton { glyph: "\u{25CB}"; label: "Ellipse"; tool-id: 4; active-tool: CanvasApi.tool; }
+        ToolButton { glyph: "~"; label: "Pen"; tool-id: 5; active-tool: CanvasApi.tool; }
+        ToolButton { glyph: "T"; label: "Text"; tool-id: 6; active-tool: CanvasApi.tool; }
+
+        Sep { }
+
+        // ---- Stroke color (preset swatches) ----
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: "Color";
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+            }
+        }
+        Swatch { swatch: #FFEB3B; active-color: CanvasApi.stroke-color; }
+        Swatch { swatch: #FFFFFF; active-color: CanvasApi.stroke-color; }
+        Swatch { swatch: #FF5252; active-color: CanvasApi.stroke-color; }
+        Swatch { swatch: #FF9800; active-color: CanvasApi.stroke-color; }
+        Swatch { swatch: #4CAF50; active-color: CanvasApi.stroke-color; }
+        Swatch { swatch: #00BCD4; active-color: CanvasApi.stroke-color; }
+        Swatch { swatch: #2196F3; active-color: CanvasApi.stroke-color; }
+        Swatch { swatch: #E040FB; active-color: CanvasApi.stroke-color; }
+
+        Sep { }
+
+        // ---- Stroke width (scene units, 1..=24 like egui) ----
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: "Width";
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+            }
+        }
+        Slider {
+            width: 90px;
+            minimum: 1;
+            maximum: 24;
+            value <=> CanvasApi.stroke-width;
+            changed value => { CanvasApi.set-stroke-width(self.value); }
+        }
+
+        // ---- Fill toggle (closed shapes only) ----
+        if CanvasApi.fill-enabled: VerticalLayout {
+            alignment: center;
+            CheckBox {
+                text: "Fill";
+                checked <=> CanvasApi.filled;
+                toggled => { CanvasApi.set-filled(CanvasApi.filled); }
+            }
+        }
+
+        Sep { }
+
+        // ---- Undo / Clear ----
+        MiniTextButton {
+            width: 64px;
+            height: 24px;
+            label: "UNDO";
+            clicked => { CanvasApi.undo-annotation(); }
+        }
+        MiniTextButton {
+            width: 70px;
+            height: 24px;
+            label: "CLEAR";
+            clicked => { CanvasApi.clear-annotations(); }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        // ---- Hint text (matches the egui toolbar's dim hint) ----
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: CanvasApi.tool == 0
+                    ? "Click an annotation to select, drag to move, Del to remove"
+                    : "Click and drag on the preview to draw";
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// One corner resize handle (visual only — the canvas TouchArea does the
+// hit-testing). egui used an 8px white square with a blue border.
+export component ResizeHandle inherits Rectangle {
+    width: 8px;
+    height: 8px;
+    background: white;
+    border-width: 1px;
+    border-color: #0078FF;
+    border-radius: 1px;
+}
+
+// A draggable text overlay label: semi-transparent background box + text,
+// mirroring the egui/rasterizer rendering (bg from pos-(4,2), 8x4 padding).
+export component OverlayLabel inherits Rectangle {
+    in property <CanvasTextView> overlay;
+
+    x: root.overlay.x * 1px - 4px;
+    y: root.overlay.y * 1px - 2px;
+    width: lbl.preferred-width + 8px;
+    height: lbl.preferred-height + 4px;
+    background: #000000A0;
+    border-radius: 2px;
+
+    lbl := Text {
+        x: 4px;
+        y: 2px;
+        text: root.overlay.text;
+        font-size: root.overlay.font-size * 1px;
+        color: white;
+    }
+}

@@ -25,7 +25,11 @@ import { AudioTab } from "audio_tab.slint";
 import { ChatTab } from "chat_tab.slint";
 import { StatsTab } from "stats_tab.slint";
 import { SettingsWindow } from "settings.slint";
-import { ListView, TabWidget, Palette } from "std-widgets.slint";
+import { ListView, TabWidget, Palette, LineEdit } from "std-widgets.slint";
+import { AnnotationToolbar, ResizeHandle, OverlayLabel } from "annotations.slint";
+import { CanvasApi } from "canvas_api.slint";
+// Re-export so the Rust glue can drive the canvas editing layer.
+export { CanvasApi }
 
 // One Quick Actions bar button: a 56x46 rounded tile with a glyph above a
 // label — the same footprint as the old egui bar, restyled with the theme.
@@ -133,6 +137,12 @@ export component MainWindow inherits Window {
     property <bool> actions-shown: PanelsApi.show-controls;
     property <bool> log-shown: PanelsApi.show-event-log;
 
+    // ---- Phase 3: the annotation toolbar inserts a 36px strip below the
+    // top bar; rail and canvas shift by the same amount while it is visible
+    // (push.rs mirrors this offset in its area math). ----
+    property <bool> annot-shown: PanelsApi.show-annotations;
+    property <length> annot-shift: annot-shown ? Theme.annotations-h : 0px;
+
     // ---- Top slim menu bar ----
     Rectangle {
         x: 0;
@@ -166,25 +176,25 @@ export component MainWindow inherits Window {
     // ---- Scenes rail (scenes + sources + text overlays) ----
     ScenesRail {
         x: 0;
-        y: Theme.topbar-h;
+        y: Theme.topbar-h + annot-shift;
         width: Theme.rail-w;
-        height: root.height - Theme.topbar-h;
+        height: root.height - Theme.topbar-h - annot-shift;
         visible: rail-shown;
     }
 
     // ---- Preview canvas area ----
     Rectangle {
         x: rail-shown ? Theme.rail-w : 0px;
-        y: Theme.topbar-h;
+        y: Theme.topbar-h + annot-shift;
         width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
-        height: root.height - Theme.topbar-h - (actions-shown ? Theme.actions-h : 0px) - (log-shown ? Theme.log-h : 0px);
+        height: root.height - Theme.topbar-h - annot-shift - (actions-shown ? Theme.actions-h : 0px) - (log-shown ? Theme.log-h : 0px);
         visible: PanelsApi.show-preview;
         background: Theme.card;
 
         // Letterboxed scene output (geometry pushed from the glue).
         Rectangle {
             x: Api.canvas-x - (rail-shown ? Theme.rail-w : 0px);
-            y: Api.canvas-y - Theme.topbar-h;
+            y: Api.canvas-y - (Theme.topbar-h + annot-shift);
             width: Api.canvas-width;
             height: Api.canvas-height;
             background: Theme.canvas-bg;
@@ -228,6 +238,133 @@ export component MainWindow inherits Window {
                     text: item.name;
                     font-size: Theme.font-sm;
                     color: #B4B4B4;
+                }
+            }
+
+            // ---- Phase 3: annotation layer (visuals only — all pointer
+            // handling runs through the single canvas TouchArea below). The
+            // for-loops need a plain container because Slint cannot chain
+            // `if` and `for` in one statement. ----
+            if annot-shown: Rectangle {
+                width: 100%;
+                height: 100%;
+
+                for ann in CanvasApi.annotations: Path {
+                    width: 100%;
+                    height: 100%;
+                    viewbox-width: CanvasApi.scene-width;
+                    viewbox-height: CanvasApi.scene-height;
+                    commands: ann.commands;
+                    stroke: ann.stroke;
+                    stroke-width: ann.stroke-width * 1px;
+                    fill: ann.filled ? ann.stroke : transparent;
+                }
+
+                // Text annotations render as plain strings at their point.
+                for ann in CanvasApi.annotations: Text {
+                    x: ann.x * 1px;
+                    y: ann.y * 1px - ann.font-size * 1px;
+                    text: ann.text;
+                    font-size: ann.font-size * 1px;
+                    color: ann.stroke;
+                }
+            }
+
+            // The shape currently being dragged (live preview).
+            if annot-shown && CanvasApi.drawing-active: Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: CanvasApi.scene-width;
+                viewbox-height: CanvasApi.scene-height;
+                commands: CanvasApi.drawing.commands;
+                stroke: CanvasApi.stroke-color;
+                stroke-width: CanvasApi.stroke-width * 1px;
+                fill: CanvasApi.filled ? CanvasApi.stroke-color : transparent;
+            }
+
+            // Selected annotation outline (cyan, like the egui port).
+            if annot-shown && CanvasApi.has-selection: Rectangle {
+                x: CanvasApi.sel-x * 1px - 4px;
+                y: CanvasApi.sel-y * 1px - 4px;
+                width: CanvasApi.sel-width * 1px + 8px;
+                height: CanvasApi.sel-height * 1px + 8px;
+                border-width: 1.5px;
+                border-color: #00B4FF;
+            }
+
+            // Text overlays created from the Scenes rail — draggable labels.
+            if annot-shown: Rectangle {
+                width: 100%;
+                height: 100%;
+
+                for ov in CanvasApi.text-overlays: OverlayLabel {
+                    overlay: ov;
+                }
+            }
+
+            // Selected item corner handles (drag near a corner to resize —
+            // the handles themselves are visuals only, like the egui ones).
+            if annot-shown && CanvasApi.selected-item-index >= 0 && !CanvasApi.draw-active: Rectangle {
+                x: Api.scene-items[CanvasApi.selected-item-index].x - 5px;
+                y: Api.scene-items[CanvasApi.selected-item-index].y - 5px;
+                width: Api.scene-items[CanvasApi.selected-item-index].width + 10px;
+                height: Api.scene-items[CanvasApi.selected-item-index].height + 10px;
+                border-width: 2px;
+                border-color: #0078FF;
+
+                ResizeHandle { x: 0; y: 0; }
+                ResizeHandle { x: parent.width - self.width; y: 0; }
+                ResizeHandle { x: 0; y: parent.height - self.height; }
+                ResizeHandle { x: parent.width - self.width; y: parent.height - self.height; }
+            }
+
+            // Single canvas input surface: press/release/move funnel into the
+            // glue, which runs the draw/select/resize state machine.
+            if annot-shown: TouchArea {
+                width: 100%;
+                height: 100%;
+
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        CanvasApi.canvas-press(self.mouse-x / 1px, self.mouse-y / 1px);
+                    }
+                    if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                        CanvasApi.canvas-release(self.mouse-x / 1px, self.mouse-y / 1px);
+                    }
+                }
+                changed mouse-x => {
+                    if (self.pressed) { CanvasApi.canvas-move(self.mouse-x / 1px, self.mouse-y / 1px); }
+                }
+                changed mouse-y => {
+                    if (self.pressed) { CanvasApi.canvas-move(self.mouse-x / 1px, self.mouse-y / 1px); }
+                }
+            }
+
+            // Inline text-annotation editor (200px wide, like egui). Escape is
+            // a DEVIATION: LineEdit has no escape callback, so empty commits
+            // delete and non-empty commits save.
+            if CanvasApi.editing: Rectangle {
+                x: CanvasApi.edit-x * 1px;
+                y: CanvasApi.edit-y * 1px;
+                width: 210px;
+                height: 30px;
+                background: #101010E0;
+                border-width: 1px;
+                border-color: Theme.border;
+                init => { ed.focus(); }
+
+                HorizontalLayout {
+                    padding-left: 3px;
+                    padding-right: 3px;
+                    padding-top: 3px;
+                    padding-bottom: 3px;
+                    spacing: 3px;
+
+                    ed := LineEdit {
+                        text <=> CanvasApi.text-input;
+                        placeholder-text: "annotation text";
+                        accepted(text) => { CanvasApi.commit-text-edit(text); }
+                    }
                 }
             }
 
@@ -447,6 +584,15 @@ export component MainWindow inherits Window {
                 }
             }
         }
+    }
+
+    // ---- Annotation toolbar overlay (36px, below the top bar). Declared
+    // after the right column so its overflow region stays on top and the
+    // undo/clear buttons remain clickable when the strip overflows. ----
+    if annot-shown: AnnotationToolbar {
+        x: rail-shown ? Theme.rail-w : 0px;
+        y: Theme.topbar-h;
+        width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
     }
 
     // ---- Menu bar overlay (dropdowns extend over the regions below; the

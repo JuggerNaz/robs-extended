@@ -10,6 +10,7 @@
 
 import { Theme } from "theme.slint";
 import { PanelsApi } from "panels_api.slint";
+import { CanvasApi } from "canvas_api.slint";
 
 component MenuEntryButton inherits Rectangle {
     in property <string> label;
@@ -145,6 +146,16 @@ export component MenuBar inherits Rectangle {
                 root.open-menu = -1;
                 root.just-switched = -1;
                 accept
+            } else if (e.text == Key.Delete || e.text == Key.Backspace) {
+                // Phase 3: route Delete/Backspace to the annotation layer so
+                // a selected annotation/overlay can be removed from the
+                // keyboard; everything else falls through.
+                if (CanvasApi.has-selection) {
+                    CanvasApi.delete-selected();
+                    accept
+                } else {
+                    reject
+                }
             } else {
                 reject
             }
