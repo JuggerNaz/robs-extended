@@ -54,6 +54,7 @@ ROBS is organized as a Rust workspace with modular crates:
 | `robs-outputs` | RTMP streaming, file recording, multi-destination output |
 | `robs-sources` | Capture sources (window, monitor, game, test pattern) |
 | `robs-ui` | egui-based graphical user interface |
+| `robs-ui-slint` | Slint-based graphical user interface (newer front-end) |
 | `robs-plugins` | Plugin architecture with dynamic library loading |
 | `robs-profiles` | Profile management and settings persistence |
 | `robs-chat` | Multi-platform chat aggregation (Twitch, YouTube) |
@@ -116,6 +117,12 @@ On Windows the compiled binary will be at `target\x86_64-pc-windows-msvc\release
 cargo run
 ```
 
+To try the newer Slint front-end (the egui UI remains the default for now):
+
+```bash
+cargo run -- --ui slint
+```
+
 ## Current Status
 
 This is a functional project with a working UI, capture, encoding, streaming, and recording pipeline on Windows. The following major components are implemented:
@@ -141,6 +148,15 @@ This is a functional project with a working UI, capture, encoding, streaming, an
 - **macOS** builds and runs since the cross-platform refactor: webcam/mic capture (AVFoundation), recording, streaming, blackbox/anomaly, and snapshots all work. Monitor/window capture is gated off until a native ScreenCaptureKit backend lands — those source types report a clear error in the UI. NVENC auto-detects as unavailable, so encoding falls back to libx264. FFmpeg ≥ 8 is expected (device enumeration matches its AVFoundation listing format).
 - **Linux** compiles with a PulseAudio audio-input placeholder; not yet tested.
 
+#### Windows UI Fixes (Slint annotation toolbar)
+
+- **Bigger fonts** - the global font scale was raised (`font-xs` 9→11px, `font-sm` 11→13px, `font-md` 13→15px, `font-lg` 16→17px) so labels stay readable at distance and on high-DPI displays.
+- **Toolbar left gap** - the annotation toolbar now spans the full window width starting at the left edge, instead of leaving a gap where the scenes rail would sit.
+- **Narrow-window overlap** - the toolbar clips its content, so resizing the window small can no longer paint toolbar controls over the right-hand panel tabs (verified at 900px window width).
+- **Vertical centering** - tool buttons, color swatches, separators, the width slider and the undo/clear buttons are centered on a single midline via Slint 1.17's `cross-axis-alignment: center`, instead of being top-pinned in the 36px strip.
+
+All fixes were verified on Windows (MSVC build, `winit-software` Slint backend) with pixel-level screenshot checks and a clean `cargo test --workspace` run.
+
 ### Not Yet Implemented (High Priority)
 
 1. **macOS screen/window capture** - ScreenCaptureKit backend to replace the gated DXGI/gdigrab paths
@@ -165,6 +181,4 @@ The project builds and runs with:
 - **Cross-platform** by construction - platform code is isolated behind `#[cfg]` gates with per-platform FFmpeg input backends
 - **Performance** with LTO and optimized release builds
 
-## License
-
-GPL-3.0
+# License (GPL-3.0)

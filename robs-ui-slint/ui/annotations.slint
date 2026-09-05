@@ -82,12 +82,19 @@ component Sep inherits Rectangle {
 export component AnnotationToolbar inherits Rectangle {
     background: Theme.card-alt;
     height: Theme.annotations-h;
+    // Narrow windows cannot fit the whole row — clip so the overflow never
+    // paints over the right column's tabs.
+    clip: true;
 
     HorizontalLayout {
         x: Theme.spacing-sm;
         width: parent.width - 2 * Theme.spacing-sm;
         spacing: Theme.spacing-sm;
         alignment: start;
+        // The default cross-axis behavior stretches every item to the strip's
+        // height, which top-pins fixed-height controls; centering each item
+        // keeps buttons, swatches, separators and the slider on one midline.
+        cross-axis-alignment: center;
 
         // ---- Tools: Select first, then the drawable shapes ----
         ToolButton { glyph: "\u{2316}"; label: "Select"; tool-id: 0; active-tool: CanvasApi.tool; }

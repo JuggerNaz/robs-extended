@@ -586,13 +586,14 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ---- Annotation toolbar overlay (36px, below the top bar). Declared
-    // after the right column so its overflow region stays on top and the
-    // undo/clear buttons remain clickable when the strip overflows. ----
+    // ---- Annotation toolbar overlay (36px, below the top bar). Spans the
+    // full window width so there is no hole to the left of the rail top;
+    // it stops at the right column. Declared after the right column so it
+    // stays on top (Phase 3 undo/clear z-order fix). ----
     if annot-shown: AnnotationToolbar {
-        x: rail-shown ? Theme.rail-w : 0px;
+        x: 0;
         y: Theme.topbar-h;
-        width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
+        width: root.width - (right-shown ? Theme.right-w : 0px);
     }
 
     // ---- Menu bar overlay (dropdowns extend over the regions below; the
