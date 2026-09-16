@@ -13,6 +13,7 @@ robs-sources.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
 chrono.workspace = true
+serialport.workspace = true
 image = "0.25"
 ab_glyph = "0.2"
 

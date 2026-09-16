@@ -197,6 +197,37 @@ pub struct AnomalyState {
     pub event_rx: Option<robs_core::event::EventRx>,
 }
 
+/// Serial data-string telemetry feed state (ROV nav strings over a COM port).
+///
+/// The reader thread lives in `telemetry.rs` and publishes into `snapshot`;
+/// start/stop go through `RobsController::start_telemetry`/`stop_telemetry`.
+pub struct TelemetryState {
+    /// Persisted connection settings (config-dir `settings.json`, `serial`
+    /// section).
+    pub settings: robs_profiles::settings::SerialTelemetrySettings,
+    /// True while a reader thread is running.
+    pub running: bool,
+    /// Latest parsed record + connection health, written by the reader thread
+    /// and read by the UI tick.
+    pub snapshot: std::sync::Arc<parking_lot::RwLock<super::telemetry::TelemetrySnapshot>>,
+    pub(crate) stop_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TelemetryState {
+    pub fn new(settings: robs_profiles::settings::SerialTelemetrySettings) -> Self {
+        Self {
+            settings,
+            running: false,
+            snapshot: std::sync::Arc::new(parking_lot::RwLock::new(
+                super::telemetry::TelemetrySnapshot::default(),
+            )),
+            stop_flag: None,
+            reader: None,
+        }
+    }
+}
+
 /// Source-properties modal editing state.
 pub struct EditingState {
     pub show_source_properties: bool,

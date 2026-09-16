@@ -25,6 +25,10 @@ import { AudioTab } from "audio_tab.slint";
 import { ChatTab } from "chat_tab.slint";
 import { StatsTab } from "stats_tab.slint";
 import { SettingsWindow } from "settings.slint";
+import { TelemetryApi } from "telemetry_api.slint";
+// Re-export so the Rust glue can drive the telemetry bar + dialog.
+export { TelemetryApi }
+import { TelemetryDialog } from "telemetry_dialog.slint";
 import { ListView, TabWidget, Palette, LineEdit } from "std-widgets.slint";
 import { AnnotationToolbar, ResizeHandle, OverlayLabel } from "annotations.slint";
 import { CanvasApi } from "canvas_api.slint";
@@ -73,6 +77,24 @@ component QuickButton inherits Rectangle {
         color: root.enabled ? white : Theme.text-dim;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+}
+
+// One label-over-value column of the bottom data-string bar.
+component DataSlot inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    alignment: center;
+    Text {
+        text: root.label;
+        font-size: Theme.font-xs;
+        color: Theme.text-dim;
+    }
+    Text {
+        text: root.value;
+        font-size: Theme.font-sm;
+        color: Theme.text;
+        overflow: elide;
     }
 }
 
@@ -178,7 +200,7 @@ export component MainWindow inherits Window {
         x: 0;
         y: Theme.topbar-h + annot-shift;
         width: Theme.rail-w;
-        height: root.height - Theme.topbar-h - annot-shift;
+        height: root.height - Theme.topbar-h - annot-shift - Theme.data-h;
         visible: rail-shown;
     }
 
@@ -187,7 +209,7 @@ export component MainWindow inherits Window {
         x: rail-shown ? Theme.rail-w : 0px;
         y: Theme.topbar-h + annot-shift;
         width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
-        height: root.height - Theme.topbar-h - annot-shift - (actions-shown ? Theme.actions-h : 0px) - (log-shown ? Theme.log-h : 0px);
+        height: root.height - Theme.topbar-h - annot-shift - (actions-shown ? Theme.actions-h : 0px) - (log-shown ? Theme.log-h : 0px) - Theme.data-h;
         visible: PanelsApi.show-preview;
         background: Theme.card;
 
@@ -420,7 +442,7 @@ export component MainWindow inherits Window {
     // ---- Quick Actions bar ----
     Rectangle {
         x: rail-shown ? Theme.rail-w : 0px;
-        y: root.height - Theme.actions-h - (log-shown ? Theme.log-h : 0px);
+        y: root.height - Theme.actions-h - (log-shown ? Theme.log-h : 0px) - Theme.data-h;
         width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
         height: Theme.actions-h;
         visible: actions-shown;
@@ -487,7 +509,7 @@ export component MainWindow inherits Window {
         x: root.width - Theme.right-w;
         y: Theme.topbar-h;
         width: Theme.right-w;
-        height: root.height - Theme.topbar-h;
+        height: root.height - Theme.topbar-h - Theme.data-h;
         visible: right-shown;
         background: Theme.card;
 
@@ -507,7 +529,7 @@ export component MainWindow inherits Window {
     // ---- Event log strip ----
     Rectangle {
         x: rail-shown ? Theme.rail-w : 0px;
-        y: root.height - Theme.log-h;
+        y: root.height - Theme.log-h - Theme.data-h;
         width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
         height: Theme.log-h;
         visible: log-shown;
@@ -586,6 +608,97 @@ export component MainWindow inherits Window {
         }
     }
 
+    // ---- Data-string telemetry bar (always shown, full window width) ----
+    Rectangle {
+        x: 0;
+        y: root.height - Theme.data-h;
+        width: root.width;
+        height: Theme.data-h;
+        background: Theme.card-alt;
+
+        // Top separator.
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: 1px;
+            background: Theme.border;
+        }
+
+        HorizontalLayout {
+            x: Theme.spacing-sm;
+            width: parent.width - 2 * Theme.spacing-sm;
+            height: parent.height;
+            spacing: Theme.spacing-md;
+            alignment: start;
+
+            // Status: colored dot + "DATA STRING" over the live status word.
+            Rectangle {
+                width: 118px;
+                height: parent.height;
+
+                Rectangle {
+                    x: 0;
+                    y: 14px;
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: TelemetryApi.status-state == 1 ? Theme.success-green
+                        : (TelemetryApi.status-state == 2 ? Theme.warning-orange : Theme.text-dim);
+                }
+                Text {
+                    x: 16px;
+                    y: 4px;
+                    text: "DATA STRING";
+                    font-size: Theme.font-xs;
+                    font-weight: 700;
+                    color: Theme.text;
+                }
+                Text {
+                    x: 16px;
+                    y: 18px;
+                    text: TelemetryApi.status;
+                    font-size: Theme.font-xs;
+                    color: TelemetryApi.status-state == 1 ? Theme.success-green
+                        : (TelemetryApi.status-state == 2 ? Theme.warning-orange : Theme.text-dim);
+                }
+            }
+
+            DataSlot { label: "EASTING"; value: TelemetryApi.easting; }
+            DataSlot { label: "NORTHING"; value: TelemetryApi.northing; }
+            DataSlot { label: "DEPTH"; value: TelemetryApi.depth; }
+            DataSlot { label: "DATE"; value: TelemetryApi.date; }
+            DataSlot { label: "TIME"; value: TelemetryApi.time; }
+            DataSlot { label: "ROV HEADING"; value: TelemetryApi.heading; }
+            DataSlot { label: "CP VALUE"; value: TelemetryApi.cp; }
+            DataSlot { label: "FG VALUE"; value: TelemetryApi.fg; }
+            DataSlot { label: "LAST CHECK"; value: TelemetryApi.last-check; }
+
+            // Spacer pushes the gear to the right edge.
+            Rectangle { }
+
+            Rectangle {
+                width: 30px;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: gear-touch.has-hover ? Theme.border : transparent;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "\u{2699}";
+                    font-size: 16px;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                gear-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { TelemetryApi.open-dialog(); }
+                }
+            }
+        }
+    }
+
     // ---- Annotation toolbar overlay (36px, below the top bar). Spans the
     // full window width so there is no hole to the left of the rail top;
     // it stops at the right column. Declared after the right column so it
@@ -615,6 +728,9 @@ export component MainWindow inherits Window {
 
     // ---- Settings window (self-hides unless PanelsApi.settings-open) ----
     SettingsWindow { }
+
+    // ---- Data-string settings dialog (gear on the bottom bar) ----
+    TelemetryDialog { }
 
     // ---- Source-properties modal (topmost; hidden unless open) ----
     SourcePropertiesDialog { }

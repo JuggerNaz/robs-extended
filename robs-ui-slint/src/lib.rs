@@ -12,6 +12,7 @@ mod canvas_glue;
 mod panels_glue;
 mod push;
 mod sources_glue;
+mod telemetry_glue;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -128,6 +129,9 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
     let panels = Rc::new(RefCell::new(panels_glue::PanelsUi::new()));
     panels_glue::install(&component.as_weak(), &controller, &panels);
 
+    // ---- Data-string telemetry: bar callbacks + dialog ----
+    telemetry_glue::install(&component.as_weak(), &controller);
+
     // ---- Phase 3: canvas editing (items + annotations + overlays) ----
     // `pushed` is created before the canvas install: the pointer callbacks
     // read `pushed.canvas` (refreshed every tick by `push_state`) to convert
@@ -142,6 +146,7 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
     push::push_state(&component, &mut controller.borrow_mut(), &mut pushed.borrow_mut());
     sources_glue::push(&component, &mut controller.borrow_mut(), &mut sources.borrow_mut());
     panels_glue::push(&component, &mut controller.borrow_mut(), &mut panels.borrow_mut());
+    telemetry_glue::push(&component, &controller.borrow());
 
     // ---- Tick timer: SingleShot, re-armed with the engine's wake hint ----
     // A `slint::Timer` cannot be re-armed with a NEW interval from inside its
@@ -195,6 +200,7 @@ fn arm_tick(
             push::push_state(&component, &mut controller.borrow_mut(), &mut pushed.borrow_mut());
             sources_glue::push(&component, &mut controller.borrow_mut(), &mut sources.borrow_mut());
             panels_glue::push(&component, &mut controller.borrow_mut(), &mut panels.borrow_mut());
+            telemetry_glue::push(&component, &controller.borrow());
         }
         arm_tick(
             &next,

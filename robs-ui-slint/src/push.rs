@@ -43,6 +43,9 @@ pub mod layout {
     /// Annotation toolbar strip height — mirrors `ui/theme.slint`
     /// (`annotations-h`).
     pub const TOOLBAR_H: f32 = 36.0;
+    /// Bottom data-string telemetry bar height — mirrors `ui/theme.slint`
+    /// (`data-h`).
+    pub const DATA_H: f32 = 36.0;
 }
 
 /// Handles to the models installed in `Api`, plus mirrors of the last pushed
@@ -209,7 +212,10 @@ pub fn push_state(
     let area_x = rail_w;
     let area_y = layout::TOPBAR_H + toolbar_h;
     let area_w = (win_w - rail_w - right_w).max(1.0);
-    let area_h = (win_h - layout::TOPBAR_H - toolbar_h - actions_h - log_h).max(1.0);
+    // The telemetry data bar sits at the very bottom and is always shown,
+    // so its height is subtracted unconditionally (mirrors the markup).
+    let area_h = (win_h - layout::TOPBAR_H - toolbar_h - actions_h - log_h - layout::DATA_H)
+        .max(1.0);
 
     let scale_x = area_w / scene_w as f32;
     let scale_y = area_h / scene_h as f32;

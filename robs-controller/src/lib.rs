@@ -19,6 +19,7 @@ mod capture;
 mod clips;
 mod record;
 mod stream;
+pub mod telemetry;
 
 pub mod annotation_raster;
 pub mod devices;
@@ -34,7 +35,7 @@ use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
 use state::{
     AnnotationState, AnomalyState, BlackboxState, EditingState, EventLogEntry, EventLogKind,
-    PreviewState, RecordState, StreamState,
+    PreviewState, RecordState, StreamState, TelemetryState,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -100,10 +101,22 @@ pub struct RobsController {
     pub blackbox: BlackboxState,
     // User-toggled short-clip anomaly capture buffer.
     pub anomaly: AnomalyState,
+    // Serial data-string telemetry feed (ROV nav strings over a COM port).
+    pub telemetry: TelemetryState,
 }
 
 impl RobsController {
     pub fn new() -> Self {
+        let mut this = Self::build();
+        // Auto-connect the telemetry feed on launch when enabled (settings
+        // are persisted; the reader retries while the port is unavailable).
+        if this.telemetry.settings.enabled {
+            this.start_telemetry();
+        }
+        this
+    }
+
+    fn build() -> Self {
         let detection = detect_encoders();
 
         let mut video_encoders = Vec::new();
@@ -280,6 +293,9 @@ impl RobsController {
                     event_rx: Some(rx),
                 }
             },
+            telemetry: TelemetryState::new(
+                robs_profiles::settings::SerialTelemetrySettings::load_or_default(),
+            ),
         }
     }
 

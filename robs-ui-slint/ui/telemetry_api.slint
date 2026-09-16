@@ -1,0 +1,36 @@
+//! Data-string telemetry view contract: the bottom status bar (glue -> UI
+//! values) and the gear dialog (UI -> glue commands, two-way config fields).
+//! Status states: 0 = stopped (grey), 1 = running (green), 2 = waiting
+//! (orange — port open but silent, or reconnecting).
+
+export global TelemetryApi {
+    // ---- Commands (UI -> glue) ----
+    callback open-dialog();
+    // Commit the dialog (port, baud index) — persists settings, restarts the
+    // reader when running, and closes the dialog.
+    callback dialog-apply(string, int);
+    callback toggle-running();
+
+    // ---- Bar (glue -> UI) ----
+    in property <bool> running;
+    in property <int> status-state;
+    in property <string> status;
+
+    in property <string> easting;
+    in property <string> northing;
+    in property <string> depth;
+    in property <string> date;
+    in property <string> time;
+    in property <string> heading;
+    in property <string> cp;
+    in property <string> fg;
+    in property <string> last-check;
+
+    // ---- Dialog ----
+    in property <bool> dialog-open;
+    // Serial ports found on the system (seeded when the dialog opens).
+    in property <[string]> available-ports;
+    // Editable dialog fields; committed through `dialog-apply`.
+    in-out property <string> cfg-port;
+    in-out property <int> cfg-baud-index;
+}

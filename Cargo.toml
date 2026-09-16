@@ -47,6 +47,7 @@ fastrand = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 image = "0.25"
 fs4 = { version = "1", features = ["sync"] }
+serialport = "4"
 
 robs-core = { path = "robs-core" }
 robs-video = { path = "robs-video" }

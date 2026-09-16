@@ -198,6 +198,148 @@ impl AnomalySettings {
     }
 }
 
+/// Settings for the serial data-string telemetry feed (ROV nav strings over
+/// a COM port). The feed auto-connects on launch when `enabled`; the reader
+/// keeps retrying while the port is missing or held by another program.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Missing fields deserialize to the struct defaults, so a partial or
+/// hand-edited `serial` section still loads.
+#[serde(default)]
+pub struct SerialTelemetrySettings {
+    /// Port name (e.g. `"COM3"`, `"/dev/ttyUSB0"`).
+    pub port: String,
+    /// Baud rate. The ROV nav feed uses 9600.
+    pub baud: u32,
+    /// Master switch: auto-connect on app launch and keep reconnecting.
+    pub enabled: bool,
+}
+
+impl Default for SerialTelemetrySettings {
+    fn default() -> Self {
+        Self {
+            port: "COM3".into(),
+            baud: 9600,
+            enabled: true,
+        }
+    }
+}
+
+/// Outcome of reading one section of the settings file.
+enum SectionRead {
+    /// The file is readable JSON and carries the section.
+    Present(serde_json::Value),
+    /// The file is missing, or is readable JSON without the section — a
+    /// normal first-run state, not an error.
+    Absent,
+    /// The file exists but could not be read, or is not a JSON object.
+    Unreadable,
+}
+
+/// Read the raw JSON `key` section of the object at `path`.
+fn read_section(path: &Path, key: &str) -> SectionRead {
+    let Ok(content) = fs::read_to_string(path) else {
+        return if path.exists() {
+            SectionRead::Unreadable
+        } else {
+            SectionRead::Absent
+        };
+    };
+    match serde_json::from_str::<serde_json::Value>(&content) {
+        // A valid settings file is a JSON object; anything else (array,
+        // string, malformed JSON) is a corrupt file, not an empty one.
+        Ok(root) if root.is_object() => match root.get(key) {
+            Some(value) => SectionRead::Present(value.clone()),
+            None => SectionRead::Absent,
+        },
+        _ => SectionRead::Unreadable,
+    }
+}
+
+impl SerialTelemetrySettings {
+    /// Load the `serial` section from the canonical settings file.
+    ///
+    /// - Section present: those settings (missing fields fall back to the
+    ///   struct defaults via `#[serde(default)]`).
+    /// - Section absent (first run, or a `settings.json` predating this
+    ///   feature): defaults, silently, and the defaults are seeded into the
+    ///   file once so the section exists for hand-editing. An absent section
+    ///   is a normal state, not an error — no warning.
+    /// - File unreadable or not valid JSON: warn on stderr and use defaults;
+    ///   a bad hand-edit must never keep the app from starting (the section
+    ///   is left untouched for the user to fix).
+    pub fn load_or_default() -> Self {
+        let Some(path) = settings_file_path() else {
+            return Self::default();
+        };
+        let (settings, seed) = Self::resolve_from(&path);
+        if let Some(seed) = seed {
+            // Best-effort: seeding only materializes the defaults on disk.
+            let _ = seed.save_to(&path);
+        }
+        settings
+    }
+
+    /// Classify `path` and choose the settings to run with, plus an optional
+    /// defaults bundle to seed an absent section with. Pure — no disk writes
+    /// and no stderr on the happy paths — so it can be unit-tested against
+    /// temp files instead of the real config dir.
+    fn resolve_from(path: &Path) -> (Self, Option<Self>) {
+        match read_section(path, "serial") {
+            SectionRead::Present(value) => match serde_json::from_value(value) {
+                Ok(settings) => (settings, None),
+                Err(_) => (Self::warn_unreadable(path), None),
+            },
+            SectionRead::Absent => {
+                let defaults = Self::default();
+                (defaults.clone(), Some(defaults))
+            }
+            SectionRead::Unreadable => (Self::warn_unreadable(path), None),
+        }
+    }
+
+    fn warn_unreadable(path: &Path) -> Self {
+        eprintln!(
+            "[Settings] serial telemetry settings unreadable, using defaults: {}",
+            path.display()
+        );
+        Self::default()
+    }
+
+    /// Persist the `serial` section to the canonical settings file.
+    pub fn save(&self) -> Result<()> {
+        let path = settings_file_path().context("could not determine the config directory")?;
+        self.save_to(&path)
+    }
+
+    /// Read the `serial` section of the JSON object at `path`. `None` when
+    /// the file is missing, unreadable, invalid JSON, or has no `serial` key.
+    pub fn load_from(path: &Path) -> Option<Self> {
+        match read_section(path, "serial") {
+            SectionRead::Present(value) => serde_json::from_value(value).ok(),
+            _ => None,
+        }
+    }
+
+    /// Write the `serial` section into the JSON object at `path`, preserving
+    /// every other section already present.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        let mut root: serde_json::Value = fs::read_to_string(path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let obj = root
+            .as_object_mut()
+            .context("settings file root is not a JSON object")?;
+        obj.insert("serial".into(), serde_json::to_value(self)?);
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(&root)?)?;
+        Ok(())
+    }
+}
+
 /// Canonical settings file: `<config_dir>/settings.json`, sibling of the
 /// `profiles/` directory `ProfileManager` uses (same `ProjectDirs` root).
 pub fn settings_file_path() -> Option<PathBuf> {
@@ -432,5 +574,141 @@ impl HotkeyBinding {
             key: key.to_string(),
             modifiers: modifiers.into_iter().map(String::from).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Unique scratch dir per call (no tempfile dev-dependency).
+    fn scratch_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "robs-settings-{}-{}-{}",
+            tag,
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn missing_file_is_absent_and_seeds_defaults() {
+        let dir = scratch_dir("missing");
+        let path = dir.join("settings.json");
+        // A missing file is a normal first run: defaults, no warn, seed.
+        let (settings, seed) = SerialTelemetrySettings::resolve_from(&path);
+        assert_eq!(settings, SerialTelemetrySettings::default());
+        let seed = seed.expect("absent section should be seeded");
+        seed.save_to(&path).unwrap();
+        assert_eq!(SerialTelemetrySettings::load_from(&path), Some(seed));
+        // Re-reading a seeded file is stable and no longer asks for a seed.
+        let (settings, seed) = SerialTelemetrySettings::resolve_from(&path);
+        assert_eq!(settings, SerialTelemetrySettings::default());
+        assert!(seed.is_none());
+    }
+
+    #[test]
+    fn absent_section_in_readable_file_is_silent_and_seeded() {
+        let dir = scratch_dir("absent");
+        let path = dir.join("settings.json");
+        write_file(&path, r#"{"anomaly": {"enabled": true}}"#);
+        let (settings, seed) = SerialTelemetrySettings::resolve_from(&path);
+        assert_eq!(settings, SerialTelemetrySettings::default());
+        seed.expect("absent serial section should be seeded")
+            .save_to(&path)
+            .unwrap();
+        // Seeding preserves sibling sections.
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["anomaly"]["enabled"], serde_json::json!(true));
+        assert_eq!(root["serial"]["port"], serde_json::json!("COM3"));
+    }
+
+    #[test]
+    fn invalid_json_warns_and_does_not_seed() {
+        let dir = scratch_dir("corrupt");
+        let path = dir.join("settings.json");
+        write_file(&path, "{ not json");
+        let (settings, seed) = SerialTelemetrySettings::resolve_from(&path);
+        assert_eq!(settings, SerialTelemetrySettings::default());
+        assert!(seed.is_none(), "a corrupt file must not be overwritten by seeding");
+    }
+
+    #[test]
+    fn malformed_section_warns_and_does_not_seed() {
+        let dir = scratch_dir("malformed");
+        let path = dir.join("settings.json");
+        write_file(&path, r#"{"serial": {"baud": "not-a-number"}}"#);
+        let (settings, seed) = SerialTelemetrySettings::resolve_from(&path);
+        assert_eq!(settings, SerialTelemetrySettings::default());
+        assert!(seed.is_none());
+    }
+
+    #[test]
+    fn valid_section_loads_without_seed() {
+        let dir = scratch_dir("valid");
+        let path = dir.join("settings.json");
+        write_file(
+            &path,
+            r#"{"serial": {"port": "COM7", "baud": 115200, "enabled": false}}"#,
+        );
+        let (settings, seed) = SerialTelemetrySettings::resolve_from(&path);
+        assert_eq!(settings.port, "COM7");
+        assert_eq!(settings.baud, 115200);
+        assert!(!settings.enabled);
+        assert!(seed.is_none());
+    }
+
+    #[test]
+    fn partial_section_fills_defaults() {
+        let dir = scratch_dir("partial");
+        let path = dir.join("settings.json");
+        write_file(&path, r#"{"serial": {"port": "COM9"}}"#);
+        let settings = SerialTelemetrySettings::load_from(&path).unwrap();
+        assert_eq!(
+            settings,
+            SerialTelemetrySettings {
+                port: "COM9".into(),
+                ..SerialTelemetrySettings::default()
+            }
+        );
+    }
+
+    #[test]
+    fn load_from_missing_or_sectionless_file_is_none() {
+        let dir = scratch_dir("none");
+        assert!(SerialTelemetrySettings::load_from(&dir.join("settings.json")).is_none());
+        let path = dir.join("settings.json");
+        write_file(&path, "{}");
+        assert!(SerialTelemetrySettings::load_from(&path).is_none());
+    }
+
+    #[test]
+    fn save_preserves_sibling_sections() {
+        let dir = scratch_dir("preserve");
+        let path = dir.join("settings.json");
+        write_file(&path, r#"{"anomaly": {"enabled": true}}"#);
+        SerialTelemetrySettings {
+            port: "COM5".into(),
+            ..SerialTelemetrySettings::default()
+        }
+        .save_to(&path)
+        .unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["anomaly"]["enabled"], serde_json::json!(true));
+        assert_eq!(root["serial"]["port"], serde_json::json!("COM5"));
     }
 }

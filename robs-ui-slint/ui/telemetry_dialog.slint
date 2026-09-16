@@ -1,0 +1,158 @@
+//! Data-string settings dialog (opened by the bar's gear button). A centered
+//! card over a click-away backdrop; dismissing the backdrop commits the
+//! fields the same way the Close button does.
+
+import { Theme } from "theme.slint";
+import { TelemetryApi } from "telemetry_api.slint";
+import { ComboBox, LineEdit } from "std-widgets.slint";
+
+export component TelemetryDialog inherits Rectangle {
+    background: #00000080;
+    visible: TelemetryApi.dialog-open;
+
+    // Click-away backdrop commits + closes (same as Close).
+    TouchArea {
+        clicked => {
+            TelemetryApi.dialog-apply(TelemetryApi.cfg-port, TelemetryApi.cfg-baud-index);
+        }
+
+        card := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 360px;
+            height: 210px;
+            border-radius: Theme.radius;
+            background: Theme.card;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            // Keep clicks on the card from falling through to the backdrop.
+            TouchArea { }
+
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                // ---- Title row ----
+                HorizontalLayout {
+                    height: 24px;
+                    alignment: start;
+                    spacing: Theme.spacing-sm;
+
+                    Text {
+                        text: "DATA STRING";
+                        font-size: Theme.font-md;
+                        font-weight: 700;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { }
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        border-radius: Theme.radius-sm;
+                        background: close-touch.has-hover ? Theme.border : transparent;
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "\u{2715}";
+                            font-size: Theme.font-sm;
+                            color: Theme.text-dim;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        close-touch := TouchArea {
+                            clicked => {
+                                TelemetryApi.dialog-apply(TelemetryApi.cfg-port, TelemetryApi.cfg-baud-index);
+                            }
+                        }
+                    }
+                }
+
+                // ---- Port ----
+                HorizontalLayout {
+                    height: 30px;
+                    spacing: Theme.spacing-sm;
+                    Text {
+                        width: 64px;
+                        text: "PORT";
+                        font-size: Theme.font-xs;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                    }
+                    LineEdit {
+                        text <=> TelemetryApi.cfg-port;
+                        placeholder-text: "COM3";
+                    }
+                }
+
+                // ---- Baud ----
+                HorizontalLayout {
+                    height: 30px;
+                    spacing: Theme.spacing-sm;
+                    Text {
+                        width: 64px;
+                        text: "BAUD";
+                        font-size: Theme.font-xs;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        model: ["4800", "9600", "19200", "38400", "57600", "115200"];
+                        current-index <=> TelemetryApi.cfg-baud-index;
+                    }
+                }
+
+                Rectangle { }
+
+                // ---- Actions ----
+                HorizontalLayout {
+                    height: 32px;
+                    spacing: Theme.spacing-sm;
+                    alignment: end;
+
+                    Rectangle {
+                        width: 96px;
+                        height: 32px;
+                        border-radius: Theme.radius-sm;
+                        background: TelemetryApi.running ? Theme.warning-orange : Theme.success-green;
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: TelemetryApi.running ? "STOP" : "START";
+                            font-size: Theme.font-sm;
+                            color: white;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => { TelemetryApi.toggle-running(); }
+                        }
+                    }
+                    Rectangle {
+                        width: 96px;
+                        height: 32px;
+                        border-radius: Theme.radius-sm;
+                        background: close-btn-touch.has-hover ? Theme.accent-hover : Theme.accent;
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "SAVE & CLOSE";
+                            font-size: Theme.font-sm;
+                            color: white;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        close-btn-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                TelemetryApi.dialog-apply(TelemetryApi.cfg-port, TelemetryApi.cfg-baud-index);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
