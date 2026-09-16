@@ -160,6 +160,56 @@ pub(crate) fn spawn_reader(
         .expect("spawn telemetry reader thread")
 }
 
+/// Position of the next `*F` + numeric record-start marker in `acc` — i.e.
+/// the start of the record AFTER the currently buffered one. The legacy star
+/// formats head every record with the `F` frame counter (`*F0010\t…`,
+/// `*F0.005*…`); no other `*` token starts with `F`, and the primary tab
+/// format has no `*` at all, so this is a safe boundary for all three
+/// captured shapes.
+fn find_record_marker(acc: &[u8]) -> Option<usize> {
+    // Start at 1: a marker at position 0 heads the record still being
+    // buffered and can never be a boundary.
+    (1..acc.len().saturating_sub(2)).find(|&i| {
+        acc[i] == b'*'
+            && acc[i + 1] == b'F'
+            && (acc[i + 2].is_ascii_digit() || acc[i + 2] == b'.')
+    })
+}
+
+/// Extract every complete record from the byte accumulator, removing the
+/// consumed bytes and returning them as strings.
+///
+/// Records end three ways: at a `\n` (primary tab format), at the start of
+/// the next record's `F` frame-counter marker (legacy star formats), or —
+/// for one-shot streams that stop mid-record — the caller's idle flush.
+/// A marker split across two reads is simply not seen until the next chunk
+/// completes it; boundaries are found late, never wrong.
+fn drain_complete_records(acc: &mut Vec<u8>) -> Vec<String> {
+    let mut out = Vec::new();
+    loop {
+        // Earliest boundary: `\n` (consume it) or the next `*F` marker
+        // (leave it to head the next record). A marker at position 0 is the
+        // buffered record's own start, not a boundary.
+        let mut end: Option<(usize, bool)> = acc
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| (p, true));
+        if let Some(p) = find_record_marker(acc) {
+            if end.is_none_or(|(e, _)| p < e) {
+                end = Some((p, false));
+            }
+        }
+        let Some((pos, is_newline)) = end else {
+            break;
+        };
+        let consumed = if is_newline { pos + 1 } else { pos };
+        let line_bytes: Vec<u8> = acc.drain(..consumed).collect();
+        let keep = if is_newline { pos } else { line_bytes.len() };
+        out.push(String::from_utf8_lossy(&line_bytes[..keep]).into_owned());
+    }
+    out
+}
+
 /// Reconnect-looping serial reader: open the port, drain it into lines, and
 /// on any failure close, publish the error, wait 2 s, and retry — forever,
 /// until stopped.
@@ -190,9 +240,7 @@ fn read_serial(settings: &SerialTelemetrySettings, stop: &AtomicBool, snapshot: 
                         Ok(n) => {
                             acc.extend_from_slice(&chunk[..n]);
                             last_rx = Instant::now();
-                            while let Some(pos) = acc.iter().position(|&b| b == b'\n') {
-                                let line: Vec<u8> = acc.drain(..=pos).collect();
-                                let line = String::from_utf8_lossy(&line[..pos]).into_owned();
+                            for line in drain_complete_records(&mut acc) {
                                 publish_line(&line, snapshot);
                             }
                         }
@@ -352,5 +400,44 @@ mod tests {
         let f = fields("e\t1.0\tcp\t-800");
         assert_eq!(f["E"], "1.0");
         assert_eq!(f["CP"], "-800");
+    }
+
+    #[test]
+    fn drains_newline_records_and_keeps_partial_tail() {
+        let mut acc = b"E\t1\tN\t2\nE\t3\tN\t4\nE\t5".to_vec();
+        let lines = drain_complete_records(&mut acc);
+        assert_eq!(lines, vec!["E\t1\tN\t2", "E\t3\tN\t4"]);
+        assert_eq!(acc, b"E\t5");
+    }
+
+    #[test]
+    fn drains_star_records_by_frame_marker_without_newlines() {
+        let mut acc = b"F0.004*E 1*N 2*Z12*L*F0.005*E 3*N 4*Z13*L*F0.006".to_vec();
+        let lines = drain_complete_records(&mut acc);
+        assert_eq!(lines, vec!["F0.004*E 1*N 2*Z12*L", "*F0.005*E 3*N 4*Z13*L"]);
+        assert_eq!(acc, b"*F0.006");
+        // The drained records still parse (marker tail included).
+        let f: HashMap<String, String> =
+            parse_line(&lines[1]).unwrap().into_iter().collect();
+        assert_eq!(f["E"], "3");
+        assert_eq!(f["F"], "0.005");
+    }
+
+    #[test]
+    fn marker_split_across_chunks_is_not_lost() {
+        let mut acc = b"F0.004*E 1*L*".to_vec();
+        // Trailing lone `*`: no complete marker yet, nothing drained.
+        assert!(drain_complete_records(&mut acc).is_empty());
+        acc.extend_from_slice(b"F0.005*E 2*L");
+        let lines = drain_complete_records(&mut acc);
+        assert_eq!(lines, vec!["F0.004*E 1*L"]);
+        assert_eq!(acc, b"*F0.005*E 2*L");
+    }
+
+    #[test]
+    fn leading_marker_does_not_split_first_record() {
+        let mut acc = b"*F0010\t*E  229201\t*N 2822709".to_vec();
+        assert!(drain_complete_records(&mut acc).is_empty());
+        assert_eq!(acc, b"*F0010\t*E  229201\t*N 2822709");
     }
 }
