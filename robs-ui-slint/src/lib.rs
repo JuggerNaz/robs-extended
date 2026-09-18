@@ -11,6 +11,7 @@
 mod canvas_glue;
 mod panels_glue;
 mod push;
+mod qid_glue;
 mod sources_glue;
 mod telemetry_glue;
 
@@ -132,6 +133,10 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
     // ---- Data-string telemetry: bar callbacks + dialog ----
     telemetry_glue::install(&component.as_weak(), &controller);
 
+    // ---- QID rail: Postgres component list + click-to-mark segments ----
+    let qid_ui = Rc::new(RefCell::new(qid_glue::QidUi::new()));
+    qid_glue::install(&component.as_weak(), &controller, &qid_ui);
+
     // ---- Phase 3: canvas editing (items + annotations + overlays) ----
     // `pushed` is created before the canvas install: the pointer callbacks
     // read `pushed.canvas` (refreshed every tick by `push_state`) to convert
@@ -147,6 +152,7 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
     sources_glue::push(&component, &mut controller.borrow_mut(), &mut sources.borrow_mut());
     panels_glue::push(&component, &mut controller.borrow_mut(), &mut panels.borrow_mut());
     telemetry_glue::push(&component, &controller.borrow());
+    qid_glue::push(&component, &controller.borrow(), &qid_ui.borrow());
 
     // ---- Tick timer: SingleShot, re-armed with the engine's wake hint ----
     // A `slint::Timer` cannot be re-armed with a NEW interval from inside its
@@ -158,16 +164,17 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
     let timer_b = Rc::new(Timer::default());
     {
         let component = component.as_weak();
-        arm_tick(
-            &timer_a,
-            &timer_b,
-            &component,
-            &controller,
-            &pushed,
-            &sources,
-            &panels,
-            IDLE_TICK,
-        );
+    arm_tick(
+        &timer_a,
+        &timer_b,
+        &component,
+        &controller,
+        &pushed,
+        &sources,
+        &panels,
+        &qid_ui,
+        IDLE_TICK,
+    );
     }
 
     component.run()
@@ -184,6 +191,7 @@ fn arm_tick(
     pushed: &Rc<RefCell<push::PushedState>>,
     sources: &Rc<RefCell<sources_glue::SourcesUi>>,
     panels: &Rc<RefCell<panels_glue::PanelsUi>>,
+    qid: &Rc<RefCell<qid_glue::QidUi>>,
     delay: Duration,
 ) {
     let this = Rc::clone(timer);
@@ -194,6 +202,7 @@ fn arm_tick(
     let pushed = Rc::clone(pushed);
     let sources = Rc::clone(sources);
     let panels = Rc::clone(panels);
+    let qid = Rc::clone(qid);
     this.start(TimerMode::SingleShot, delay, move || {
         let wake = controller.borrow_mut().tick();
         if let Some(component) = component.upgrade() {
@@ -201,6 +210,7 @@ fn arm_tick(
             sources_glue::push(&component, &mut controller.borrow_mut(), &mut sources.borrow_mut());
             panels_glue::push(&component, &mut controller.borrow_mut(), &mut panels.borrow_mut());
             telemetry_glue::push(&component, &controller.borrow());
+            qid_glue::push(&component, &controller.borrow(), &qid.borrow());
         }
         arm_tick(
             &next,
@@ -210,6 +220,7 @@ fn arm_tick(
             &pushed,
             &sources,
             &panels,
+            &qid,
             wake.unwrap_or(IDLE_TICK),
         );
     });

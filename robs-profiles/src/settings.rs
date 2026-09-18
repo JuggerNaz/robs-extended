@@ -340,6 +340,121 @@ impl SerialTelemetrySettings {
     }
 }
 
+/// Settings for the inspection database (web-app-offshore's Supabase
+/// Postgres). The QID rail loads `structure_components` rows for the
+/// configured structure and persists QID time-segments after a recording.
+///
+/// The URL is the Supabase **session-pooler** connection string
+/// (`postgresql://postgres.<ref>:<password>@<region>.pooler.supabase.com:5432/postgres`);
+/// the Rust `postgres` client relies on prepared statements, which the
+/// transaction-mode pooler (port 6543) does not reliably support.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Missing fields deserialize to the struct defaults, so a partial or
+/// hand-edited `database` section still loads.
+#[serde(default)]
+pub struct DatabaseSettings {
+    /// Full Postgres connection URL (includes the DB password — this file
+    /// lives in the user's config dir, never in the repo).
+    pub url: String,
+    /// `structure_components.structure_id` whose QIDs the rail loads.
+    pub structure_id: i32,
+    /// Master switch: load QIDs on launch and write segments on stop.
+    pub enabled: bool,
+}
+
+impl Default for DatabaseSettings {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            structure_id: 0,
+            enabled: false,
+        }
+    }
+}
+
+impl DatabaseSettings {
+    /// Load the `database` section from the canonical settings file,
+    /// mirroring [`SerialTelemetrySettings::load_or_default`]: present
+    /// section wins (missing fields fall back via `#[serde(default)]`),
+    /// absent section seeds defaults once, unreadable section warns.
+    pub fn load_or_default() -> Self {
+        let Some(path) = settings_file_path() else {
+            return Self::default();
+        };
+        let (settings, seed) = Self::resolve_from(&path);
+        if let Some(seed) = seed {
+            // Best-effort: seeding only materializes the defaults on disk.
+            let _ = seed.save_to(&path);
+        }
+        settings
+    }
+
+    /// Classify `path` and choose the settings to run with, plus an optional
+    /// defaults bundle to seed an absent section with. Pure — no disk writes
+    /// and no stderr on the happy paths — so it can be unit-tested against
+    /// temp files instead of the real config dir.
+    fn resolve_from(path: &Path) -> (Self, Option<Self>) {
+        match read_section(path, "database") {
+            SectionRead::Present(value) => match serde_json::from_value(value) {
+                Ok(settings) => (settings, None),
+                Err(_) => (Self::warn_unreadable(path), None),
+            },
+            SectionRead::Absent => {
+                let defaults = Self::default();
+                (defaults.clone(), Some(defaults))
+            }
+            SectionRead::Unreadable => (Self::warn_unreadable(path), None),
+        }
+    }
+
+    fn warn_unreadable(path: &Path) -> Self {
+        eprintln!(
+            "[Settings] database settings unreadable, using defaults: {}",
+            path.display()
+        );
+        Self::default()
+    }
+
+    /// Persist the `database` section to the canonical settings file.
+    pub fn save(&self) -> Result<()> {
+        let path = settings_file_path().context("could not determine the config directory")?;
+        self.save_to(&path)
+    }
+
+    /// Read the `database` section of the JSON object at `path`. `None` when
+    /// the file is missing, unreadable, invalid JSON, or has no `database` key.
+    pub fn load_from(path: &Path) -> Option<Self> {
+        match read_section(path, "database") {
+            SectionRead::Present(value) => serde_json::from_value(value).ok(),
+            _ => None,
+        }
+    }
+
+    /// Write the `database` section into the JSON object at `path`, preserving
+    /// every other section already present.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        let mut root: serde_json::Value = fs::read_to_string(path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let obj = root
+            .as_object_mut()
+            .context("settings file root is not a JSON object")?;
+        obj.insert("database".into(), serde_json::to_value(self)?);
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(&root)?)?;
+        Ok(())
+    }
+
+    /// True when the settings carry enough information to talk to the DB.
+    pub fn is_configured(&self) -> bool {
+        self.enabled && !self.url.trim().is_empty() && self.structure_id > 0
+    }
+}
+
 /// Canonical settings file: `<config_dir>/settings.json`, sibling of the
 /// `profiles/` directory `ProfileManager` uses (same `ProjectDirs` root).
 pub fn settings_file_path() -> Option<PathBuf> {

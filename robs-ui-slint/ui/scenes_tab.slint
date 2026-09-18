@@ -1,0 +1,68 @@
+//! Right-column "Scenes" tab: the scene list (select / add / remove) moved
+//! out of the former left rail when the rail became the QID list. Drives the
+//! same `Api.select-scene` + `SourcesApi.add/remove-scene` commands as the
+//! rail did; both stay in sync through the glue.
+
+import { Theme } from "theme.slint";
+import { Api } from "api.slint";
+import { SourcesApi } from "sources_api.slint";
+import { IconButton } from "scenes_rail.slint";
+import { ListView } from "std-widgets.slint";
+
+export component ScenesTab inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding: Theme.spacing-sm;
+        spacing: Theme.spacing-sm;
+
+        HorizontalLayout {
+            height: 24px;
+            spacing: Theme.spacing-xs;
+
+            Text {
+                horizontal-stretch: 1;
+                text: "SCENES";
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+                letter-spacing: 1px;
+                vertical-alignment: center;
+            }
+            IconButton { glyph: "+"; tint: Theme.text; clicked => { SourcesApi.add-scene(); } }
+            IconButton { glyph: "\u{2212}"; tint: Theme.text; clicked => { SourcesApi.remove-scene(); } }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+
+            ListView {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+
+                for name in Api.scene-names: Rectangle {
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    background: name == Api.selected-scene ? Theme.accent
+                        : (scene-touch.has-hover ? Theme.card-alt : transparent);
+
+                    scene-touch := TouchArea {
+                        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+                        clicked => { Api.select-scene(name); }
+                    }
+                    Text {
+                        x: Theme.spacing-sm;
+                        width: parent.width - 2 * Theme.spacing-sm;
+                        height: parent.height;
+                        text: name;
+                        font-size: Theme.font-sm;
+                        color: name == Api.selected-scene ? white : Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}

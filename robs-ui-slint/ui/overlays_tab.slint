@@ -1,0 +1,116 @@
+//! Right-column "Overlays" tab: text overlays (add / visibility / remove)
+//! moved out of the former left rail when the rail became the QID list.
+//! Drives the same `SourcesApi` overlay commands the rail used.
+
+import { Theme } from "theme.slint";
+import { Api } from "api.slint";
+import { SourcesApi } from "sources_api.slint";
+import { IconButton } from "scenes_rail.slint";
+import { ListView, LineEdit } from "std-widgets.slint";
+
+export component OverlaysTab inherits Rectangle {
+    background: transparent;
+
+    property <string> overlay-draft;
+
+    function commit-overlay() {
+        // The glue ignores empty/whitespace input.
+        SourcesApi.add-overlay(root.overlay-draft);
+        root.overlay-draft = "";
+    }
+
+    VerticalLayout {
+        padding: Theme.spacing-sm;
+        spacing: Theme.spacing-sm;
+
+        if !Api.scene-present: Text {
+            height: parent.height;
+            text: "No active scene";
+            font-size: Theme.font-md;
+            color: Theme.text-dim;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        if Api.scene-present: Text {
+            text: "TEXT OVERLAYS";
+            font-size: Theme.font-xs;
+            color: Theme.text-dim;
+            letter-spacing: 1px;
+        }
+
+        if Api.scene-present: HorizontalLayout {
+            height: 28px;
+            spacing: Theme.spacing-xs;
+
+            LineEdit {
+                horizontal-stretch: 1;
+                height: 28px;
+                placeholder-text: "Overlay text...";
+                text <=> root.overlay-draft;
+                accepted(text) => { root.commit-overlay(); }
+            }
+            Rectangle {
+                width: 44px;
+                height: 24px;
+                border-radius: Theme.radius-sm;
+                background: add-touch.has-hover ? Theme.border : Theme.card-alt;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Add";
+                    font-size: Theme.font-xs;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                add-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { root.commit-overlay(); }
+                }
+            }
+        }
+
+        if Api.scene-present: Rectangle {
+            vertical-stretch: 1;
+
+            ListView {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+
+                for ov in SourcesApi.overlays: Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: ov-touch.has-hover ? Theme.card-alt : transparent;
+
+                    ov-touch := TouchArea { width: 100%; height: 100%; }
+                    HorizontalLayout {
+                        spacing: Theme.spacing-xs;
+
+                        IconButton {
+                            glyph: ov.visible ? "\u{25CF}" : "\u{25CB}";
+                            tint: ov.visible ? Theme.accent-hover : Theme.text-dim;
+                            clicked => { SourcesApi.set-overlay-visible(ov.id, !ov.visible); }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            height: parent.height;
+                            text: ov.text;
+                            font-size: Theme.font-sm;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        IconButton {
+                            glyph: "\u{2715}";
+                            tint: Theme.live-red;
+                            clicked => { SourcesApi.remove-overlay(ov.id); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

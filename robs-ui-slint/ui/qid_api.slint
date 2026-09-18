@@ -1,0 +1,41 @@
+//! QID rail view contract (additive to the frozen `Api` global): the glue
+//! pushes `structure_components` rows and the current-selection state, the
+//! rail sends clicks, search text, and refresh requests back.
+
+export struct QidRowView {
+    /// `structure_components.id`.
+    id: int,
+    /// `structure_components.q_id`.
+    q-id: string,
+    /// Sub-label (`id_no`, fallback `code`).
+    sub: string,
+    /// True for the currently open/selected QID (green highlight).
+    current: bool,
+}
+
+export global QidApi {
+    // ---- Commands (UI -> glue) ----
+    callback select-qid(int);
+    callback refresh();
+    // Live search filter; the glue re-pushes the filtered rows.
+    callback search(string);
+    // Info action for the current QID (event-log entry).
+    callback details();
+
+    // ---- View models (glue -> UI) ----
+    in property <[QidRowView]> rows;
+    // "QID LIST (N)" header count: total loaded rows, not the filtered view.
+    in property <int> total;
+
+    // ---- Current QID panel (glue -> UI) ----
+    in property <bool> has-current;
+    in property <string> current-qid;
+    in property <string> current-sub;
+    // Wall-clock time the current segment opened ("14:32:42"), em dash when none.
+    in property <string> current-start;
+
+    // ---- DB status chip (glue -> UI) ----
+    in property <string> db-status;
+    // 0 = neutral, 1 = good (green), 2 = warn (orange).
+    in property <int> db-status-state;
+}

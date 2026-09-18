@@ -17,6 +17,8 @@ mod anomaly;
 mod blackbox;
 mod capture;
 mod clips;
+pub mod db;
+pub mod qid;
 mod record;
 mod stream;
 pub mod telemetry;
@@ -103,6 +105,9 @@ pub struct RobsController {
     pub anomaly: AnomalyState,
     // Serial data-string telemetry feed (ROV nav strings over a COM port).
     pub telemetry: TelemetryState,
+    // QID rail: structure components from the inspection DB + click-marked
+    // recording time segments (see `qid.rs` / `db.rs`).
+    pub qid: qid::QidState,
 }
 
 impl RobsController {
@@ -113,6 +118,8 @@ impl RobsController {
         if this.telemetry.settings.enabled {
             this.start_telemetry();
         }
+        // Auto-load the QID list when the inspection DB is configured.
+        this.init();
         this
     }
 
@@ -296,6 +303,23 @@ impl RobsController {
             telemetry: TelemetryState::new(
                 robs_profiles::settings::SerialTelemetrySettings::load_or_default(),
             ),
+            qid: {
+                let settings = robs_profiles::settings::DatabaseSettings::load_or_default();
+                let worker = settings
+                    .is_configured()
+                    .then(|| db::spawn(settings.clone()));
+                let mut state = qid::QidState::new(settings);
+                state.db = worker;
+                state
+            },
+        }
+    }
+
+    /// Load the QID list at launch when the database is configured (the
+    /// telemetry analogue of auto-connect).
+    pub fn init(&mut self) {
+        if self.qid.settings.is_configured() && self.qid.db.is_some() {
+            self.refresh_qids();
         }
     }
 
@@ -455,6 +479,12 @@ impl RobsController {
         // their results surface promptly (replaces the export thread's old
         // repaint request; cadence matches the 100 ms above).
         if self.record.clip_export_pending > 0 {
+            wake = min_wake(wake, std::time::Duration::from_millis(100));
+        }
+
+        // Drain QID DB worker results (component lists, insert outcomes);
+        // keep ticking while a load/save is in flight.
+        if self.drain_qid_db_events() {
             wake = min_wake(wake, std::time::Duration::from_millis(100));
         }
 

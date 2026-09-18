@@ -48,6 +48,9 @@ chrono = { version = "0.4", features = ["serde"] }
 image = "0.25"
 fs4 = { version = "1", features = ["sync"] }
 serialport = "4"
+postgres = { version = "0.19", features = ["with-chrono-0_4"] }
+postgres-native-tls = "0.5"
+native-tls = "0.2"
 
 robs-core = { path = "robs-core" }
 robs-video = { path = "robs-video" }

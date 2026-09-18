@@ -1,6 +1,6 @@
-//! ROBS shell (Phase 1): top menu bar + status chips, Scenes rail, letterboxed
-//! live preview canvas, Quick Actions bar, right tab column (Phase 2 fills the
-//! pages), and the event-log strip.
+//! ROBS shell: top menu bar + status chips, QID rail (left), letterboxed live
+//! preview canvas, Quick Actions bar, right tab column (Scenes / Sources /
+//! Overlays / Audio / Chat / Stats), and the event-log strip.
 //!
 //! All colors/spacing come from `Theme`; all data flows through the frozen
 //! `Api` global. Item geometry and the canvas box are computed in the Rust
@@ -11,7 +11,7 @@ import { Api } from "api.slint";
 // Re-export so `slint::include_modules!()` exposes the Api global to the
 // Rust glue.
 export { Api }
-import { ScenesRail, MiniTextButton } from "scenes_rail.slint";
+import { MiniTextButton } from "scenes_rail.slint";
 import { SourcesTab } from "sources_tab.slint";
 import { SourcePropertiesDialog } from "source_properties.slint";
 // Re-export so `slint::include_modules!()` exposes the Phase 2 global to the
@@ -29,6 +29,12 @@ import { TelemetryApi } from "telemetry_api.slint";
 // Re-export so the Rust glue can drive the telemetry bar + dialog.
 export { TelemetryApi }
 import { TelemetryDialog } from "telemetry_dialog.slint";
+import { QidApi } from "qid_api.slint";
+// Re-export so the Rust glue can drive the QID rail.
+export { QidApi }
+import { QidRail } from "qid_rail.slint";
+import { ScenesTab } from "scenes_tab.slint";
+import { OverlaysTab } from "overlays_tab.slint";
 import { ListView, TabWidget, Palette, LineEdit } from "std-widgets.slint";
 import { AnnotationToolbar, ResizeHandle, OverlayLabel } from "annotations.slint";
 import { CanvasApi } from "canvas_api.slint";
@@ -195,8 +201,9 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ---- Scenes rail (scenes + sources + text overlays) ----
-    ScenesRail {
+    // ---- QID rail (structure_components list from Postgres; clicking a QID
+    // while recording marks segment boundaries) ----
+    QidRail {
         x: 0;
         y: Theme.topbar-h + annot-shift;
         width: Theme.rail-w;
@@ -314,7 +321,7 @@ export component MainWindow inherits Window {
                 border-color: #00B4FF;
             }
 
-            // Text overlays created from the Scenes rail — draggable labels.
+            // Text overlays created from the Overlays tab — draggable labels.
             if annot-shown: Rectangle {
                 width: 100%;
                 height: 100%;
@@ -519,7 +526,9 @@ export component MainWindow inherits Window {
             width: parent.width - 2 * Theme.spacing-xs;
             height: parent.height - 2 * Theme.spacing-xs;
 
+            Tab { title: "Scenes"; ScenesTab {} }
             Tab { title: "Sources"; SourcesTab {} }
+            Tab { title: "Overlays"; OverlaysTab {} }
             Tab { title: "Audio"; AudioTab {} }
             Tab { title: "Chat"; ChatTab {} }
             Tab { title: "Stats"; StatsTab {} }

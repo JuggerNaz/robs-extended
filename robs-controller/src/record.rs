@@ -439,6 +439,9 @@ impl RobsController {
                 .unwrap_or_default()
                 .as_secs(),
         );
+        // QID marking: a pre-selected QID starts its segment now (anchors
+        // are elapsed=0 / frame=0 / wall=now). New session: clear segments.
+        self.start_qid_session();
         self.log_event(
             format!("Recording started: {}", self.record.last_recording_path),
             EventLogKind::Record,
@@ -541,6 +544,12 @@ impl RobsController {
                 );
             }
         }
+
+        // 4c. QID segments: auto-close the open segment at the final
+        // anchors, write the sidecar JSON, and hand the session's segments
+        // to the DB worker. MUST run before the elapsed-time reset below —
+        // the closing anchor reads `recording_time`.
+        self.stop_qid_session();
 
         // 5. Reset state for next recording session
         self.record.recording_stop_flag =

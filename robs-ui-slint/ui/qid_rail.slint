@@ -1,0 +1,235 @@
+//! Left rail (MockupUI): the QID LIST from the inspection database
+//! (`structure_components.q_id`) plus the CURRENT QID panel. Replaces the
+//! former scenes rail, which moved into the right-column tabs (Scenes /
+//! Sources / Overlays). While a recording runs, clicking a QID marks
+//! "from the previous click to now" as belonging to the previous QID and
+//! opens a new segment for the clicked one (see `robs-controller/qid.rs`).
+
+import { Theme } from "theme.slint";
+import { QidApi, QidRowView } from "qid_api.slint";
+import { ListView, LineEdit } from "std-widgets.slint";
+
+// One entry of the QID list: status dot, QID over sub-label, click to mark.
+// (The per-row property is `entry`: `row` clashes with a builtin name.)
+component QidRow inherits Rectangle {
+    in property <QidRowView> entry;
+    callback clicked();
+
+    height: 42px;
+    border-radius: Theme.radius-sm;
+    background: root.entry.current ? #145A2D
+        : (touch.has-hover ? Theme.card-alt : transparent);
+
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: Theme.spacing-sm;
+        padding-right: Theme.spacing-sm;
+        spacing: Theme.spacing-sm;
+
+        // Status dot: green when current, dim otherwise.
+        Rectangle {
+            y: 1px;
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background: root.entry.current ? Theme.success-green : Theme.border;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 1px;
+
+            Text {
+                text: root.entry.q-id;
+                font-size: Theme.font-sm;
+                font-weight: 700;
+                color: root.entry.current ? white : Theme.text;
+                overflow: elide;
+            }
+            Text {
+                text: root.entry.sub;
+                font-size: Theme.font-xs;
+                color: root.entry.current ? #C8E6C9 : Theme.text-dim;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+export component QidRail inherits Rectangle {
+    background: Theme.card;
+
+    // Two-way search text; `edited` re-pushes the filtered rows.
+    property <string> search-text;
+
+    VerticalLayout {
+        padding: Theme.spacing-xs;
+        spacing: Theme.spacing-xs;
+
+        // ---- Header: QID LIST + total + refresh + DB status dot ----
+        HorizontalLayout {
+            height: 24px;
+            spacing: Theme.spacing-xs;
+
+            Text {
+                text: "QID LIST";
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+                letter-spacing: 1px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "(" + QidApi.total + ")";
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                y: 8px;
+                border-radius: 4px;
+                background: QidApi.db-status-state == 1 ? Theme.success-green
+                    : (QidApi.db-status-state == 2 ? Theme.warning-orange : Theme.text-dim);
+            }
+            Text {
+                text: QidApi.db-status;
+                font-size: Theme.font-xs;
+                color: QidApi.db-status-state == 1 ? Theme.success-green
+                    : (QidApi.db-status-state == 2 ? Theme.warning-orange : Theme.text-dim);
+                vertical-alignment: center;
+            }
+            // Refresh: reload the component list from the database.
+            Rectangle {
+                width: 22px;
+                height: 22px;
+                border-radius: Theme.radius-sm;
+                background: refresh-touch.has-hover ? Theme.border : transparent;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "\u{21BB}";
+                    font-size: 14px;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                refresh-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { QidApi.refresh(); }
+                }
+            }
+        }
+
+        // ---- Search QID... ----
+        LineEdit {
+            height: 28px;
+            placeholder-text: "Search QID...";
+            text <=> root.search-text;
+            edited(text) => { QidApi.search(text); }
+        }
+
+        // ---- QID rows ----
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 72px;
+
+            ListView {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+
+                for entry in QidApi.rows: QidRow {
+                    entry: entry;
+                    clicked => { QidApi.select-qid(entry.id); }
+                }
+            }
+        }
+
+        // ---- CURRENT QID panel (green, like the mockup) ----
+        Rectangle {
+            height: 74px;
+            border-radius: Theme.radius-sm;
+            background: QidApi.has-current ? #145A2D : Theme.card-alt;
+            border-width: 1px;
+            border-color: QidApi.has-current ? Theme.success-green : Theme.border;
+
+            if !QidApi.has-current: Text {
+                width: parent.width;
+                height: parent.height;
+                text: "No QID selected";
+                font-size: Theme.font-sm;
+                color: Theme.text-dim;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            if QidApi.has-current: VerticalLayout {
+                padding-left: Theme.spacing-sm;
+                padding-right: Theme.spacing-sm;
+                padding-top: Theme.spacing-xs;
+                padding-bottom: Theme.spacing-xs;
+                spacing: 2px;
+
+                HorizontalLayout {
+                    height: 22px;
+                    spacing: Theme.spacing-xs;
+
+                    // Info action: log the current QID to the event log.
+                    info-touch := TouchArea {
+                        width: 14px;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => { QidApi.details(); }
+                    }
+                    Text {
+                        width: 14px;
+                        text: "\u{24D8}";
+                        font-size: 13px;
+                        color: #C8E6C9;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "CURRENT QID";
+                        font-size: Theme.font-xs;
+                        color: #C8E6C9;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    height: 20px;
+                    text: QidApi.current-qid;
+                    font-size: Theme.font-md;
+                    font-weight: 700;
+                    color: white;
+                    overflow: elide;
+                }
+                HorizontalLayout {
+                    height: 18px;
+                    spacing: Theme.spacing-md;
+
+                    Text {
+                        text: QidApi.current-sub;
+                        font-size: Theme.font-xs;
+                        color: #C8E6C9;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: "START  " + QidApi.current-start;
+                        font-size: Theme.font-xs;
+                        color: white;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
