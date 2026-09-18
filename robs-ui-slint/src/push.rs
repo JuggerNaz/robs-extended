@@ -31,15 +31,13 @@ const LOG_ROWS: usize = 100;
 const SNAPSHOT_FLASH: Duration = Duration::from_millis(1500);
 
 /// Shell layout constants — MUST mirror `ui/theme.slint`
-/// (`topbar-h`, `rail-w`, `right-w`, `actions-h`, `log-h`): the glue
-/// letterboxes the canvas from these and the markup places the regions with
-/// the same values.
+/// (`topbar-h`, `rail-w`, `right-w`, `actions-h`): the glue letterboxes the
+/// canvas from these and the markup places the regions with the same values.
 pub mod layout {
     pub const TOPBAR_H: f32 = 40.0;
     pub const RAIL_W: f32 = 220.0;
     pub const RIGHT_W: f32 = 300.0;
-    pub const ACTIONS_H: f32 = 52.0;
-    pub const LOG_H: f32 = 110.0;
+    pub const ACTIONS_H: f32 = 56.0;
     /// Annotation toolbar strip height — mirrors `ui/theme.slint`
     /// (`annotations-h`).
     pub const TOOLBAR_H: f32 = 36.0;
@@ -197,15 +195,14 @@ pub fn push_state(
 
     // ---- Canvas fit math (ported verbatim from the old preview panel) ----
     // Effective insets mirror the View-menu visibility bindings in
-    // `ui/mainwindow.slint` (rail/right/log/actions collapse to zero when
-    // the corresponding PanelsApi show-* flag is off).
+    // `ui/mainwindow.slint` (rail/right/actions collapse to zero when the
+    // corresponding PanelsApi show-* flag is off).
     let panels = component.global::<PanelsApi>();
     let rail_w = if panels.get_show_scenes() { layout::RAIL_W } else { 0.0 };
     let right_shown =
         panels.get_show_audio() || panels.get_show_chat() || panels.get_show_stats();
     let right_w = if right_shown { layout::RIGHT_W } else { 0.0 };
     let actions_h = if panels.get_show_controls() { layout::ACTIONS_H } else { 0.0 };
-    let log_h = if panels.get_show_event_log() { layout::LOG_H } else { 0.0 };
     // The annotation toolbar inserts a strip below the top bar while shown
     // (mirrors `annot-shift` in `ui/mainwindow.slint`).
     let toolbar_h = if panels.get_show_annotations() { layout::TOOLBAR_H } else { 0.0 };
@@ -214,8 +211,7 @@ pub fn push_state(
     let area_w = (win_w - rail_w - right_w).max(1.0);
     // The telemetry data bar sits at the very bottom and is always shown,
     // so its height is subtracted unconditionally (mirrors the markup).
-    let area_h = (win_h - layout::TOPBAR_H - toolbar_h - actions_h - log_h - layout::DATA_H)
-        .max(1.0);
+    let area_h = (win_h - layout::TOPBAR_H - toolbar_h - actions_h - layout::DATA_H).max(1.0);
 
     let scale_x = area_w / scene_w as f32;
     let scale_y = area_h / scene_h as f32;

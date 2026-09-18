@@ -1,0 +1,89 @@
+//! Right-sidebar Log tab: the old bottom event-log strip moved into the tab
+//! column. Same content — header (count label + CLEAR / PDF actions) over
+//! timestamp / kind / message rows fed by `Api.log-lines`.
+
+import { Theme } from "theme.slint";
+import { Api } from "api.slint";
+import { PanelsApi } from "panels_api.slint";
+import { MiniTextButton } from "scenes_rail.slint";
+import { ListView } from "std-widgets.slint";
+
+export component EventLogTab inherits Rectangle {
+    background: transparent;
+
+    VerticalLayout {
+        padding: Theme.spacing-sm;
+        spacing: Theme.spacing-xs;
+
+        // Header: count label (from the glue) + CLEAR / PDF actions.
+        HorizontalLayout {
+            height: 20px;
+            spacing: Theme.spacing-xs;
+
+            Text {
+                text: PanelsApi.log-label;
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+                letter-spacing: 1px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            // Spacer pushes the actions to the right edge.
+            Rectangle { }
+            MiniTextButton {
+                width: 48px;
+                height: 18px;
+                label: "CLEAR";
+                tint: Theme.text-dim;
+                clicked => { PanelsApi.clear-log(); }
+            }
+            MiniTextButton {
+                width: 40px;
+                height: 18px;
+                label: "PDF";
+                tint: Theme.text-dim;
+                clicked => { PanelsApi.export-log-pdf(); }
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+
+            for line in Api.log-lines: Rectangle {
+                height: 22px;
+                background: transparent;
+
+                HorizontalLayout {
+                    padding-left: Theme.spacing-sm;
+                    padding-right: Theme.spacing-sm;
+                    spacing: Theme.spacing-xs;
+
+                    Text {
+                        width: 56px;
+                        text: line.timestamp;
+                        font-size: Theme.font-xs;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        width: 58px;
+                        text: line.kind;
+                        font-size: Theme.font-xs;
+                        color: line.kind == "record" ? Theme.warning-orange
+                            : (line.kind == "stream" ? Theme.accent-hover : Theme.text-dim);
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: line.message;
+                        font-size: Theme.font-xs;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}

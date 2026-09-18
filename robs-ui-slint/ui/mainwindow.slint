@@ -1,6 +1,7 @@
 //! ROBS shell: top menu bar + status chips, QID rail (left), letterboxed live
-//! preview canvas, Quick Actions bar, right tab column (Scenes / Sources /
-//! Overlays / Audio / Chat / Stats), and the event-log strip.
+//! preview canvas, Quick Actions bar, and the right column split into two
+//! stacked tab rows: Scenes / Sources / Overlays / Audio above, Stats / Log
+//! below (Chat is hidden for now).
 //!
 //! All colors/spacing come from `Theme`; all data flows through the frozen
 //! `Api` global. Item geometry and the canvas box are computed in the Rust
@@ -11,7 +12,7 @@ import { Api } from "api.slint";
 // Re-export so `slint::include_modules!()` exposes the Api global to the
 // Rust glue.
 export { Api }
-import { MiniTextButton } from "scenes_rail.slint";
+import { EventLogTab } from "event_log_tab.slint";
 import { SourcesTab } from "sources_tab.slint";
 import { SourcePropertiesDialog } from "source_properties.slint";
 // Re-export so `slint::include_modules!()` exposes the Phase 2 global to the
@@ -35,28 +36,35 @@ export { QidApi }
 import { QidRail } from "qid_rail.slint";
 import { ScenesTab } from "scenes_tab.slint";
 import { OverlaysTab } from "overlays_tab.slint";
-import { ListView, TabWidget, Palette, LineEdit } from "std-widgets.slint";
+import { TabWidget, Palette, LineEdit } from "std-widgets.slint";
 import { AnnotationToolbar, ResizeHandle, OverlayLabel } from "annotations.slint";
 import { CanvasApi } from "canvas_api.slint";
 // Re-export so the Rust glue can drive the canvas editing layer.
 export { CanvasApi }
 
-// One Quick Actions bar button: a 56x46 rounded tile with a glyph above a
-// label — the same footprint as the old egui bar, restyled with the theme.
-// With `enabled == false` the button is greyed out and inert but keeps its
-// footprint.
+// One Quick Actions bar button: a 64x50 tile with a single-color vector
+// glyph above a label. Every button shares ONE neutral theme (card surface,
+// 1px border, 8px radius) — states are shown by the glyph/label, not
+// per-button colors. Glyphs are drawn as `Path` shapes, not font glyphs: the
+// default UI font lacks the old codepoints (tofu boxes) and emoji fonts
+// render multicolored, which the design forbids. With `enabled == false`
+// the button is dimmed and inert but keeps its footprint.
 component QuickButton inherits Rectangle {
     in property <string> icon;
     in property <string> label;
-    in property <color> base;
     in property <bool> enabled;
     callback clicked();
 
-    width: 56px;
-    height: 46px;
-    border-radius: Theme.radius-sm;
-    background: !root.enabled ? Theme.border
-        : (touch.has-hover ? root.base.brighter(0.15) : root.base);
+    // One tint for every glyph variant; dims with the button.
+    property <color> icon-color: root.enabled ? Theme.text : Theme.text-dim;
+
+    width: 64px;
+    height: 50px;
+    border-radius: Theme.radius;
+    background: !root.enabled ? Theme.window
+        : (touch.has-hover ? Theme.border : Theme.card);
+    border-width: 1px;
+    border-color: Theme.border;
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -64,25 +72,114 @@ component QuickButton inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    Text {
-        y: 3px;
-        width: parent.width;
-        height: 24px;
-        text: root.icon;
-        font-size: 18px;
-        color: root.enabled ? white : Theme.text-dim;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    // Glyph slot: transparent area holding the one vector variant the `icon`
+    // string names. Every variant shares `icon-color`, so all icons stay
+    // single-color regardless of font availability.
+    Rectangle {
+        x: 4px;
+        y: 7px;
+        width: parent.width - 8px;
+        height: 20px;
+
+        if root.icon == "play": Path {
+            width: 16px;
+            height: 16px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M 2 1 L 15 8 L 2 15 Z";
+            fill: root.icon-color;
+        }
+        if root.icon == "pause": Path {
+            width: 16px;
+            height: 16px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M 3 2 L 6 2 L 6 14 L 3 14 Z M 10 2 L 13 2 L 13 14 L 10 14 Z";
+            fill: root.icon-color;
+        }
+        if root.icon == "stop": Path {
+            width: 16px;
+            height: 16px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M 2.5 2.5 L 13.5 2.5 L 13.5 13.5 L 2.5 13.5 Z";
+            fill: root.icon-color;
+        }
+        // Signal bars (stream activity).
+        if root.icon == "stream": Path {
+            width: 16px;
+            height: 16px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M 1 10 L 4 10 L 4 15 L 1 15 Z M 6 6.5 L 9 6.5 L 9 15 L 6 15 Z M 11 2 L 14 2 L 14 15 L 11 15 Z";
+            fill: root.icon-color;
+        }
+        // Camera body (stroked outline) + lens (filled dot).
+        if root.icon == "camera": Rectangle {
+            width: 16px;
+            height: 16px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            Path {
+                width: 16px;
+                height: 16px;
+                viewbox-width: 16;
+                viewbox-height: 16;
+                commands: "M 1.5 4.5 L 4.5 4.5 L 5.5 2.5 L 9 2.5 L 9.5 4.5 L 14.5 4.5 L 14.5 13.5 L 1.5 13.5 Z";
+                stroke: root.icon-color;
+                stroke-width: 1.25px;
+                fill: transparent;
+            }
+            Rectangle {
+                x: 5.75px;
+                y: 6.75px;
+                width: 4.5px;
+                height: 4.5px;
+                border-radius: 2.25px;
+                background: root.icon-color;
+            }
+        }
+        if root.icon == "flag": Path {
+            width: 16px;
+            height: 16px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M 2.5 1 L 4 1 L 4 15 L 2.5 15 Z M 4 2 L 13.5 4.25 L 4 6.5 Z";
+            fill: root.icon-color;
+        }
+        if root.icon == "bookmark": Path {
+            width: 16px;
+            height: 16px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M 3.5 1 L 12.5 1 L 12.5 15 L 8 11 L 3.5 15 Z";
+            fill: root.icon-color;
+        }
     }
     Text {
-        y: 29px;
-        width: parent.width;
+        x: 3px;
+        y: 31px;
+        width: parent.width - 6px;
         height: 12px;
         text: root.label;
         font-size: Theme.font-xs;
-        color: root.enabled ? white : Theme.text-dim;
+        color: root.enabled ? Theme.text : Theme.text-dim;
         horizontal-alignment: center;
         vertical-alignment: center;
+        overflow: elide;
     }
 }
 
@@ -111,7 +208,7 @@ component StatusChip inherits Rectangle {
     in property <string> elapsed;
     in property <color> active-color;
 
-    width: 112px;
+    width: 128px;
     height: 22px;
     border-radius: 11px;
     background: root.active ? root.active-color : transparent;
@@ -124,23 +221,35 @@ component StatusChip inherits Rectangle {
         spacing: Theme.spacing-xs;
         alignment: center;
 
+        // Explicit full-height wrappers: layout items keep their preferred
+        // height in this centered layout, which top-pins the content —
+        // vertical centering is done inside each wrapper instead.
         Rectangle {
             width: 7px;
-            height: 7px;
-            border-radius: 3.5px;
-            background: root.active ? white : Theme.text-dim;
+            height: parent.height;
+
+            Rectangle {
+                y: (parent.height - 7px) / 2;
+                width: 7px;
+                height: 7px;
+                border-radius: 3.5px;
+                background: root.active ? white : Theme.text-dim;
+            }
         }
         Text {
+            height: parent.height;
             text: root.label;
             font-size: Theme.font-sm;
             color: root.active ? white : Theme.text-dim;
             vertical-alignment: center;
         }
         Text {
+            height: parent.height;
             text: root.elapsed;
             font-size: Theme.font-sm;
             color: root.active ? white : Theme.text-dim;
             vertical-alignment: center;
+            overflow: elide;
         }
     }
 }
@@ -159,11 +268,10 @@ export component MainWindow inherits Window {
 
     // ---- View-menu visibility: the PanelsApi show-* flags drive the shell.
     // The effective insets here MUST mirror the canvas fit math in
-    // `src/push.rs` (rail/right/log/actions collapse to zero when hidden). ----
+    // `src/push.rs` (rail/right/actions collapse to zero when hidden). ----
     property <bool> rail-shown: PanelsApi.show-scenes;
     property <bool> right-shown: PanelsApi.show-audio || PanelsApi.show-chat || PanelsApi.show-stats;
     property <bool> actions-shown: PanelsApi.show-controls;
-    property <bool> log-shown: PanelsApi.show-event-log;
 
     // ---- Phase 3: the annotation toolbar inserts a 36px strip below the
     // top bar; rail and canvas shift by the same amount while it is visible
@@ -180,8 +288,9 @@ export component MainWindow inherits Window {
         background: Theme.card;
 
         HorizontalLayout {
-            x: root.width - 250px;
-            width: 238px;
+            // 2 x 128px chips + spacing + padding, 12px off the right edge.
+            x: root.width - 292px;
+            width: 280px;
             height: parent.height;
             spacing: Theme.spacing-sm;
             alignment: end;
@@ -216,7 +325,7 @@ export component MainWindow inherits Window {
         x: rail-shown ? Theme.rail-w : 0px;
         y: Theme.topbar-h + annot-shift;
         width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
-        height: root.height - Theme.topbar-h - annot-shift - (actions-shown ? Theme.actions-h : 0px) - (log-shown ? Theme.log-h : 0px) - Theme.data-h;
+        height: root.height - Theme.topbar-h - annot-shift - (actions-shown ? Theme.actions-h : 0px) - Theme.data-h;
         visible: PanelsApi.show-preview;
         background: Theme.card;
 
@@ -449,7 +558,7 @@ export component MainWindow inherits Window {
     // ---- Quick Actions bar ----
     Rectangle {
         x: rail-shown ? Theme.rail-w : 0px;
-        y: root.height - Theme.actions-h - (log-shown ? Theme.log-h : 0px) - Theme.data-h;
+        y: root.height - Theme.actions-h - Theme.data-h;
         width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
         height: Theme.actions-h;
         visible: actions-shown;
@@ -457,61 +566,52 @@ export component MainWindow inherits Window {
 
         HorizontalLayout {
             x: Theme.spacing-md;
-            y: (parent.height - 46px) / 2;
-            height: 46px;
+            y: (parent.height - 50px) / 2;
+            height: 50px;
             spacing: Theme.spacing-sm;
             alignment: start;
 
             QuickButton {
-                icon: !Api.recording ? "\u{25B6}" : (Api.recording-paused ? "\u{25B6}" : "\u{23F8}");
+                icon: !Api.recording || Api.recording-paused ? "play" : "pause";
                 label: !Api.recording ? "START" : (Api.recording-paused ? "RESUME" : "PAUSE");
-                base: !Api.recording ? Theme.success-green
-                    : (Api.recording-paused ? Theme.success-green : Theme.warning-orange);
                 enabled: Api.can-start;
                 clicked => { Api.start-pause-resume-record(); }
             }
             QuickButton {
-                icon: "\u{25A0}";
+                icon: "stop";
                 label: "STOP";
-                base: Theme.live-red;
                 enabled: true;
                 clicked => { Api.stop-all(); }
             }
-            Rectangle { width: 1px; background: Theme.border; }
+            Rectangle { width: 1px; height: 28px; background: Theme.border; }
             QuickButton {
-                icon: !Api.streaming ? "\u{1F4E1}" : (Api.streaming-paused ? "\u{25B6}" : "\u{23F8}");
+                icon: !Api.streaming ? "stream" : (Api.streaming-paused ? "play" : "pause");
                 label: !Api.streaming ? "STREAM" : (Api.streaming-paused ? "RESUME" : "PAUSE");
-                base: !Api.streaming ? Theme.accent
-                    : (Api.streaming-paused ? Theme.accent : Theme.warning-orange);
                 enabled: true;
                 clicked => { Api.toggle-stream(); }
             }
-            Rectangle { width: 1px; background: Theme.border; }
+            Rectangle { width: 1px; height: 28px; background: Theme.border; }
             QuickButton {
-                icon: "\u{1F4F7}";
+                icon: "camera";
                 label: "SNAPSHOT";
-                base: Theme.accent-dim;
                 enabled: Api.can-snapshot;
                 clicked => { Api.snapshot(); }
             }
+            // BOOKMARK button hidden for now: the Api.bookmark callback only
+            // writes an event-log line, so there is no real function yet.
             QuickButton {
-                icon: "\u{2691}";
-                label: "MARK";
-                base: Api.mark-open ? #FFC83C : Theme.warning-orange;
+                icon: "flag";
+                label: "CLIP";
                 enabled: Api.can-mark;
                 clicked => { Api.toggle-clip-mark(); }
-            }
-            QuickButton {
-                icon: "\u{1F516}";
-                label: "BOOKMARK";
-                base: Theme.accent-dim;
-                enabled: true;
-                clicked => { Api.bookmark(); }
             }
         }
     }
 
-    // ---- Right column (tabs — Phase 2 fills the pages) ----
+    // ---- Right column: two stacked tab rows. Upper row holds the
+    // scene-building panels (Scenes / Sources / Overlays / Audio); the lower
+    // row holds observability (Stats / Log). Chat stays wired in the glue
+    // but is not shown for now. ----
     Rectangle {
         x: root.width - Theme.right-w;
         y: Theme.topbar-h;
@@ -520,100 +620,30 @@ export component MainWindow inherits Window {
         visible: right-shown;
         background: Theme.card;
 
+        // Two rows split 62/38 with a spacing-xs gutter. Explicit heights
+        // (not a VerticalLayout): layout-driven TabWidgets negotiate
+        // min-heights with the tab contents, which the compiler reports as
+        // a binding loop through the tabs' inner layouts.
         TabWidget {
             x: Theme.spacing-xs;
             y: Theme.spacing-xs;
             width: parent.width - 2 * Theme.spacing-xs;
-            height: parent.height - 2 * Theme.spacing-xs;
+            height: (parent.height - 2 * Theme.spacing-xs) * 0.62 - Theme.spacing-xs / 2;
 
             Tab { title: "Scenes"; ScenesTab {} }
             Tab { title: "Sources"; SourcesTab {} }
             Tab { title: "Overlays"; OverlaysTab {} }
             Tab { title: "Audio"; AudioTab {} }
-            Tab { title: "Chat"; ChatTab {} }
-            Tab { title: "Stats"; StatsTab {} }
         }
-    }
 
-    // ---- Event log strip ----
-    Rectangle {
-        x: rail-shown ? Theme.rail-w : 0px;
-        y: root.height - Theme.log-h - Theme.data-h;
-        width: root.width - (rail-shown ? Theme.rail-w : 0px) - (right-shown ? Theme.right-w : 0px);
-        height: Theme.log-h;
-        visible: log-shown;
-        background: Theme.card;
-
-        HorizontalLayout {
-            x: Theme.spacing-sm;
-            y: Theme.spacing-xs;
-            width: parent.width - 2 * Theme.spacing-sm;
-            height: 18px;
-            spacing: Theme.spacing-xs;
-            alignment: start;
-
-            Text {
-                text: PanelsApi.log-label;
-                font-size: Theme.font-xs;
-                color: Theme.text-dim;
-                letter-spacing: 1px;
-                vertical-alignment: center;
-            }
-            Rectangle { }
-            MiniTextButton {
-                width: 52px;
-                height: 18px;
-                label: "CLEAR";
-                tint: Theme.text-dim;
-                clicked => { PanelsApi.clear-log(); }
-            }
-            MiniTextButton {
-                width: 44px;
-                height: 18px;
-                label: "PDF";
-                tint: Theme.text-dim;
-                clicked => { PanelsApi.export-log-pdf(); }
-            }
-        }
-        ListView {
+        TabWidget {
             x: Theme.spacing-xs;
-            y: 24px;
+            y: Theme.spacing-xs + (parent.height - 2 * Theme.spacing-xs) * 0.62 + Theme.spacing-xs / 2;
             width: parent.width - 2 * Theme.spacing-xs;
-            height: parent.height - 24px - Theme.spacing-xs;
+            height: (parent.height - 2 * Theme.spacing-xs) * 0.38 - Theme.spacing-xs / 2;
 
-            for line in Api.log-lines: Rectangle {
-                height: 22px;
-                background: transparent;
-
-                HorizontalLayout {
-                    padding-left: Theme.spacing-sm;
-                    padding-right: Theme.spacing-sm;
-                    spacing: Theme.spacing-sm;
-
-                    Text {
-                        width: 64px;
-                        text: line.timestamp;
-                        font-size: Theme.font-xs;
-                        color: Theme.text-dim;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        width: 76px;
-                        text: line.kind;
-                        font-size: Theme.font-xs;
-                        color: line.kind == "record" ? Theme.warning-orange
-                            : (line.kind == "stream" ? Theme.accent-hover : Theme.text-dim);
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: line.message;
-                        font-size: Theme.font-xs;
-                        color: Theme.text;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                }
-            }
+            Tab { title: "Stats"; StatsTab {} }
+            Tab { title: "Log"; EventLogTab {} }
         }
     }
 

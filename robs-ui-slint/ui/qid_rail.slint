@@ -109,14 +109,31 @@ export component QidRail inherits Rectangle {
                 height: 22px;
                 border-radius: Theme.radius-sm;
                 background: refresh-touch.has-hover ? Theme.border : transparent;
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "\u{21BB}";
-                    font-size: 14px;
-                    color: Theme.text;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                // Refresh arrow drawn as Paths (open circle + head): the UI
+                // font lacks U+21BB (tofu box), and Slint Path has no arc
+                // command, so the circle is a polyline (like the canvas
+                // ellipses in canvas_glue).
+                Path {
+                    width: 14px;
+                    height: 14px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    viewbox-width: 14;
+                    viewbox-height: 14;
+                    commands: "M 7.78 11.43 L 5.46 11.23 L 3.55 9.89 L 2.57 7.78 L 2.77 5.46 L 4.11 3.55 L 6.22 2.57 L 8.54 2.77 L 10.45 4.11 L 11.43 6.22 L 11.23 8.54";
+                    stroke: Theme.text;
+                    stroke-width: 1.25px;
+                    fill: transparent;
+                }
+                Path {
+                    width: 14px;
+                    height: 14px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    viewbox-width: 14;
+                    viewbox-height: 14;
+                    commands: "M 10.2 11.36 L 9.35 7.86 L 13.11 9.22 Z";
+                    fill: Theme.text;
                 }
                 refresh-touch := TouchArea {
                     mouse-cursor: MouseCursor.pointer;
@@ -185,13 +202,34 @@ export component QidRail inherits Rectangle {
                         mouse-cursor: MouseCursor.pointer;
                         clicked => { QidApi.details(); }
                     }
-                    Text {
+                    // Info icon drawn as Paths (circle + i): the UI font
+                    // lacks U+24D8 (tofu box).
+                    Rectangle {
                         width: 14px;
-                        text: "\u{24D8}";
-                        font-size: 13px;
-                        color: #C8E6C9;
-                        vertical-alignment: center;
-                        horizontal-alignment: center;
+                        height: parent.height;
+
+                        Path {
+                            width: 12px;
+                            height: 12px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            viewbox-width: 14;
+                            viewbox-height: 14;
+                            commands: "M 12.5 7 L 11.76 9.75 L 9.75 11.76 L 7 12.5 L 4.25 11.76 L 2.24 9.75 L 1.5 7 L 2.24 4.25 L 4.25 2.24 L 7 1.5 L 9.75 2.24 L 11.76 4.25 Z";
+                            stroke: #C8E6C9;
+                            stroke-width: 1px;
+                            fill: transparent;
+                        }
+                        Path {
+                            width: 12px;
+                            height: 12px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            viewbox-width: 14;
+                            viewbox-height: 14;
+                            commands: "M 6.3 6.2 L 7.7 6.2 L 7.7 10.2 L 6.3 10.2 Z M 7.95 4.1 L 7.67 4.78 L 7 5.05 L 6.33 4.78 L 6.05 4.1 L 6.33 3.43 L 7 3.15 L 7.67 3.43 Z";
+                            fill: #C8E6C9;
+                        }
                     }
                     Text {
                         horizontal-stretch: 1;

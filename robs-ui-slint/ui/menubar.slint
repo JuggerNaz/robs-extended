@@ -283,13 +283,6 @@ export component MenuBar inherits Rectangle {
                 checked: PanelsApi.show-stats;
                 triggered => { PanelsApi.show-stats = !PanelsApi.show-stats; }
             }
-            MenuItemRow {
-                label: "Event Log";
-                checked: PanelsApi.show-event-log;
-                triggered => {
-                    PanelsApi.show-event-log = !PanelsApi.show-event-log;
-                }
-            }
             MenuSep { }
             MenuItemRow {
                 label: "Annotations Toolbar";

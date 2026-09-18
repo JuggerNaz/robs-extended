@@ -39,7 +39,23 @@ component ToolButton inherits Rectangle {
         spacing: 3px;
         alignment: center;
 
-        Text {
+        // Select draws a pointer shape: the UI font has no U+2316 glyph
+        // (it renders as a tofu box).
+        if root.tool-id == 0: Rectangle {
+            width: 13px;
+            height: parent.height;
+
+            Path {
+                width: 13px;
+                height: 13px;
+                y: (parent.height - self.height) / 2;
+                viewbox-width: 14;
+                viewbox-height: 14;
+                commands: "M 2 1 L 2 11.5 L 4.9 9 L 6.6 12.8 L 8.7 11.9 L 7 8.2 L 10.8 8.2 Z";
+                fill: root.active-tool == root.tool-id ? white : Theme.text;
+            }
+        }
+        if root.tool-id != 0: Text {
             text: root.glyph;
             font-size: Theme.font-sm;
             color: root.active-tool == root.tool-id ? white : Theme.text;

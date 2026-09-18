@@ -47,13 +47,22 @@ component SourceGroup inherits Rectangle {
             padding-right: Theme.spacing-sm;
             spacing: Theme.spacing-sm;
 
-            Text {
+            // Disclosure triangle drawn as a Path: the UI font lacks
+            // U+25BE/U+25B8 (they render as tofu boxes).
+            Rectangle {
                 width: 12px;
                 height: parent.height;
-                text: root.open ? "\u{25BE}" : "\u{25B8}";
-                font-size: Theme.font-md;
-                color: Theme.text-dim;
-                vertical-alignment: center;
+
+                Path {
+                    width: 12px;
+                    height: 12px;
+                    y: (parent.height - self.height) / 2;
+                    viewbox-width: 12;
+                    viewbox-height: 12;
+                    commands: root.open ? "M 2.5 4.5 L 9.5 4.5 L 6 9.5 Z"
+                        : "M 4.5 2.5 L 9.5 6 L 4.5 9.5 Z";
+                    fill: Theme.text-dim;
+                }
             }
             Text {
                 horizontal-stretch: 1;
