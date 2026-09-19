@@ -28,6 +28,10 @@ slint::include_modules!();
 /// Idle tick used when the engine reports no pending wake.
 const IDLE_TICK: Duration = Duration::from_millis(250);
 
+// The bundled Nunito typeface is embedded and registered at compile time
+// via TTF imports in `ui/mainwindow.slint` (Slint 1.17 has no public
+// pre-component font-registration function).
+
 /// Build the window, wire the Api commands to controller operations, start
 /// the tick timer, and run the Slint event loop.
 pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
@@ -125,6 +129,45 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
     // ---- Phase 2 panels: scenes rail / sources / overlays / properties ----
     let sources = Rc::new(RefCell::new(sources_glue::SourcesUi::new()));
     sources_glue::install(&component.as_weak(), &controller, &sources);
+
+    // ---- Scene manager dialog: rename / remove by name. Add reuses the
+    // `SourcesApi.add-scene` command the old Scenes tab drove. ----
+    {
+        let ctl = Rc::clone(&controller);
+        let scene_api = component.global::<SceneApi>();
+        scene_api.on_rename_scene(move |old: slint::SharedString, new: slint::SharedString| {
+            let new = new.trim().to_string();
+            if new.is_empty() {
+                return;
+            }
+            let mut c = ctl.borrow_mut();
+            if c.scenes.rename(&old, &new) {
+                c.log_event(format!("Scene renamed: \"{old}\" -> \"{new}\""), EventLogKind::Info);
+            }
+        });
+        let ctl = Rc::clone(&controller);
+        let scene_api = component.global::<SceneApi>();
+        scene_api.on_remove_scene(move |name: slint::SharedString| {
+            let mut c = ctl.borrow_mut();
+            if c.scenes.count() <= 1 {
+                return;
+            }
+            let was_current = c.scenes.current_scene_name() == Some(name.as_str());
+            if c.scenes.remove(&name) {
+                if was_current {
+                    // Mirror the old Scenes-tab remove: land on the first
+                    // remaining scene (the pushed list is sorted).
+                    let mut names: Vec<String> =
+                        c.scenes.list().iter().map(|s| s.to_string()).collect();
+                    names.sort();
+                    if let Some(first) = names.first() {
+                        c.scenes.set_current_scene(first);
+                    }
+                }
+                c.log_event(format!("Scene removed: \"{name}\""), EventLogKind::Info);
+            }
+        });
+    }
 
     // ---- Phase 2 panels: mixer / chat / stats / event log / settings / menu ----
     let panels = Rc::new(RefCell::new(panels_glue::PanelsUi::new()));

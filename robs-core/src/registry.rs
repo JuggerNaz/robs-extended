@@ -114,6 +114,29 @@ impl SceneCollection {
         self.scenes.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Rename a scene, preserving its contents. Fails when `old` does not
+    /// exist, `new` is empty, or `new` is already taken (`new == old` is a
+    /// no-op success). The current-scene pointer follows the rename.
+    pub fn rename(&mut self, old: &str, new: &str) -> bool {
+        if old == new {
+            return self.scenes.contains_key(old);
+        }
+        if new.is_empty() || !self.scenes.contains_key(old) || self.scenes.contains_key(new) {
+            return false;
+        }
+        match self.scenes.remove(old) {
+            Some(mut scene) => {
+                scene.set_name(new.to_string());
+                self.scenes.insert(new.to_string(), scene);
+                if self.current_scene_name.as_deref() == Some(old) {
+                    self.current_scene_name = Some(new.to_string());
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Remove a scene by name
     pub fn remove(&mut self, name: &str) -> bool {
         if name == self.current_scene_name.as_deref().unwrap_or("") {

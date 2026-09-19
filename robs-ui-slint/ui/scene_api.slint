@@ -1,0 +1,21 @@
+//! Scene-manager dialog contract: state is markup-driven (the bar's gear
+//! opens the dialog; the backdrop closes it), only rename/remove need glue.
+//! The dialog reads the scene list straight from `Api.scene-names` /
+//! `Api.selected-scene`, so the glue pushes no duplicate models here.
+
+export global SceneApi {
+    // ---- Dialog state (UI-local) ----
+    in-out property <bool> dialog-open;
+    // Row targeted by the rename/remove actions (index into
+    // `Api.scene-names`); -1 until a row in the dialog is clicked.
+    in-out property <int> selected-index;
+    // Rename-editor buffer, seeded from the clicked row's name.
+    in-out property <string> edit-name;
+
+    // ---- Commands (UI -> glue) ----
+    // Rename the scene `old` to `new` (no-op on empty or duplicate names).
+    callback rename-scene(string, string);
+    // Remove the named scene (no-op while it is the only one; falls back to
+    // the first remaining scene when the current one is removed).
+    callback remove-scene(string);
+}

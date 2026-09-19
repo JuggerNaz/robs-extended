@@ -167,8 +167,8 @@ impl RobsController {
             chat_rx: None,
             scenes: {
                 let mut col = SceneCollection::new();
-                col.create_scene("Main Scene".to_string());
-                col.set_current_scene("Main Scene");
+                col.create_scene("Main".to_string());
+                col.set_current_scene("Main");
                 col
             },
             streaming_time: 0,

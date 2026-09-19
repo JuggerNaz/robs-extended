@@ -43,7 +43,10 @@ pub mod layout {
     pub const TOOLBAR_H: f32 = 36.0;
     /// Bottom data-string telemetry bar height — mirrors `ui/theme.slint`
     /// (`data-h`).
-    pub const DATA_H: f32 = 36.0;
+    pub const DATA_H: f32 = 44.0;
+    /// Scene selector bar above the canvas — mirrors `ui/theme.slint`
+    /// (`scenebar-h`).
+    pub const SCENEBAR_H: f32 = 32.0;
 }
 
 /// Handles to the models installed in `Api`, plus mirrors of the last pushed
@@ -207,11 +210,16 @@ pub fn push_state(
     // (mirrors `annot-shift` in `ui/mainwindow.slint`).
     let toolbar_h = if panels.get_show_annotations() { layout::TOOLBAR_H } else { 0.0 };
     let area_x = rail_w;
-    let area_y = layout::TOPBAR_H + toolbar_h;
+    // The scene selector bar takes a strip at the top of the preview area
+    // (always shown, mirrors the markup ordering above the letterbox).
+    let area_y = layout::TOPBAR_H + toolbar_h + layout::SCENEBAR_H;
     let area_w = (win_w - rail_w - right_w).max(1.0);
     // The telemetry data bar sits at the very bottom and is always shown,
-    // so its height is subtracted unconditionally (mirrors the markup).
-    let area_h = (win_h - layout::TOPBAR_H - toolbar_h - actions_h - layout::DATA_H).max(1.0);
+    // so its height is subtracted unconditionally (mirrors the markup),
+    // as is the scene bar strip above the canvas.
+    let area_h = (win_h - layout::TOPBAR_H - toolbar_h - actions_h - layout::DATA_H
+        - layout::SCENEBAR_H)
+        .max(1.0);
 
     let scale_x = area_w / scene_w as f32;
     let scale_y = area_h / scene_h as f32;

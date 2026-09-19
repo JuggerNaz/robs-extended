@@ -1,7 +1,8 @@
-//! ROBS shell: top menu bar + status chips, QID rail (left), letterboxed live
-//! preview canvas, Quick Actions bar, and the right column split into two
-//! stacked tab rows: Scenes / Sources / Overlays / Audio above, Stats / Log
-//! below (Chat is hidden for now).
+//! ROBS shell: top menu bar + status chips, QID rail (left), a scene selector
+//! bar above the letterboxed live preview canvas, centered Quick Actions bar,
+//! and the right column split into two stacked tab rows: Sources / Overlays /
+//! Audio above, Stats / Log below (Chat is hidden for now; the former Scenes
+//! tab became the scene bar + its gear dialog above the canvas).
 //!
 //! All colors/spacing come from `Theme`; all data flows through the frozen
 //! `Api` global. Item geometry and the canvas box are computed in the Rust
@@ -9,6 +10,14 @@
 
 import { Theme } from "theme.slint";
 import { Api } from "api.slint";
+// Bundled UI typeface (SIL OFL — see `assets/fonts/OFL.txt`): importing the
+// TTFs embeds and registers them with Slint at compile time, making the
+// "Nunito" family globally available (picked up by the window's
+// `default-font-family` below) so the shell renders the same on machines
+// without the font installed.
+import "../assets/fonts/Nunito-Regular.ttf";
+import "../assets/fonts/Nunito-SemiBold.ttf";
+import "../assets/fonts/Nunito-Bold.ttf";
 // Re-export so `slint::include_modules!()` exposes the Api global to the
 // Rust glue.
 export { Api }
@@ -34,8 +43,11 @@ import { QidApi } from "qid_api.slint";
 // Re-export so the Rust glue can drive the QID rail.
 export { QidApi }
 import { QidRail } from "qid_rail.slint";
-import { ScenesTab } from "scenes_tab.slint";
 import { OverlaysTab } from "overlays_tab.slint";
+import { SceneApi } from "scene_api.slint";
+// Re-export so the Rust glue can drive the scene rename/remove callbacks.
+export { SceneApi }
+import { SceneDialog } from "scene_dialog.slint";
 import { TabWidget, Palette, LineEdit } from "std-widgets.slint";
 import { AnnotationToolbar, ResizeHandle, OverlayLabel } from "annotations.slint";
 import { CanvasApi } from "canvas_api.slint";
@@ -183,21 +195,27 @@ component QuickButton inherits Rectangle {
     }
 }
 
-// One label-over-value column of the bottom data-string bar.
-component DataSlot inherits VerticalLayout {
+// One label-over-value column of the bottom data-string bar. Rectangle root
+// so the HorizontalLayout stretches it to the full bar height; the inner
+// layout then centers the two lines in whatever height the bar has.
+component DataSlot inherits Rectangle {
     in property <string> label;
     in property <string> value;
-    alignment: center;
-    Text {
-        text: root.label;
-        font-size: Theme.font-xs;
-        color: Theme.text-dim;
-    }
-    Text {
-        text: root.value;
-        font-size: Theme.font-sm;
-        color: Theme.text;
-        overflow: elide;
+
+    VerticalLayout {
+        alignment: center;
+
+        Text {
+            text: root.label;
+            font-size: Theme.font-xs;
+            color: Theme.text-dim;
+        }
+        Text {
+            text: root.value;
+            font-size: Theme.font-sm;
+            color: Theme.text;
+            overflow: elide;
+        }
     }
 }
 
@@ -261,6 +279,9 @@ export component MainWindow inherits Window {
     min-width: 800px;
     min-height: 600px;
     background: Theme.window;
+    // App-wide typeface — bundled in the glue (assets/fonts/Nunito-*.ttf);
+    // falls back to system fonts for glyphs Nunito lacks (e.g. the gear).
+    default-font-family: "Nunito";
 
     init => {
         Palette.color-scheme = ColorScheme.dark;
@@ -328,6 +349,77 @@ export component MainWindow inherits Window {
         height: root.height - Theme.topbar-h - annot-shift - (actions-shown ? Theme.actions-h : 0px) - Theme.data-h;
         visible: PanelsApi.show-preview;
         background: Theme.card;
+
+        // ---- Scene selector bar (mockup): scene chips centered above the
+        // stage; the gear at the far right opens the scene manager dialog
+        // (add / rename / remove). Height mirrored by SCENEBAR_H in push.rs,
+        // which letterboxes the canvas below this strip. ----
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: Theme.scenebar-h;
+
+            HorizontalLayout {
+                x: Theme.spacing-md;
+                width: parent.width - 2 * Theme.spacing-md - 36px;
+                height: parent.height;
+                spacing: Theme.spacing-xs;
+                alignment: center;
+
+                for name in Api.scene-names: Rectangle {
+                    width: min(chip-text.preferred-width + 28px, 180px);
+                    height: 26px;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: name == Api.selected-scene ? Theme.accent : Theme.border;
+                    background: name == Api.selected-scene ? Theme.accent
+                        : (chip-touch.has-hover ? Theme.card-alt : Theme.card);
+
+                    chip-text := Text {
+                        x: 14px;
+                        width: parent.width - 28px;
+                        height: parent.height;
+                        text: name;
+                        font-size: Theme.font-sm;
+                        color: name == Api.selected-scene ? white : Theme.text;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    chip-touch := TouchArea {
+                        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+                        clicked => { Api.select-scene(name); }
+                    }
+                }
+            }
+
+            // Gear (far right): opens the scene manager dialog.
+            Rectangle {
+                x: parent.width - 34px;
+                y: (parent.height - 26px) / 2;
+                width: 30px;
+                height: 26px;
+                border-radius: Theme.radius-sm;
+                background: scene-gear-touch.has-hover ? Theme.border : transparent;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "\u{2699}";
+                    font-size: 16px;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                scene-gear-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        SceneApi.edit-name = Api.selected-scene;
+                        SceneApi.dialog-open = true;
+                    }
+                }
+            }
+        }
 
         // Letterboxed scene output (geometry pushed from the glue).
         Rectangle {
@@ -565,11 +657,13 @@ export component MainWindow inherits Window {
         background: Theme.card-alt;
 
         HorizontalLayout {
-            x: Theme.spacing-md;
+            x: 0;
+            width: parent.width;
             y: (parent.height - 50px) / 2;
             height: 50px;
             spacing: Theme.spacing-sm;
-            alignment: start;
+            // Centered under the stage like the mockup.
+            alignment: center;
 
             QuickButton {
                 icon: !Api.recording || Api.recording-paused ? "play" : "pause";
@@ -609,9 +703,10 @@ export component MainWindow inherits Window {
     }
 
     // ---- Right column: two stacked tab rows. Upper row holds the
-    // scene-building panels (Scenes / Sources / Overlays / Audio); the lower
-    // row holds observability (Stats / Log). Chat stays wired in the glue
-    // but is not shown for now. ----
+    // scene-building panels (Sources / Overlays / Audio — the former Scenes
+    // tab moved into the scene bar above the canvas); the lower row holds
+    // observability (Stats / Log). Chat stays wired in the glue but is not
+    // shown for now. ----
     Rectangle {
         x: root.width - Theme.right-w;
         y: Theme.topbar-h;
@@ -630,7 +725,6 @@ export component MainWindow inherits Window {
             width: parent.width - 2 * Theme.spacing-xs;
             height: (parent.height - 2 * Theme.spacing-xs) * 0.62 - Theme.spacing-xs / 2;
 
-            Tab { title: "Scenes"; ScenesTab {} }
             Tab { title: "Sources"; SourcesTab {} }
             Tab { title: "Overlays"; OverlaysTab {} }
             Tab { title: "Audio"; AudioTab {} }
@@ -671,35 +765,40 @@ export component MainWindow inherits Window {
             spacing: Theme.spacing-md;
             alignment: start;
 
-            // Status: colored dot + "DATA STRING" over the live status word.
+            // Status: colored dot + "DATA STRING" over the live status
+            // word. Dot and text block are centered in the bar explicitly
+            // (no hardcoded y offsets — the bar height lives in Theme).
             Rectangle {
                 width: 118px;
                 height: parent.height;
 
                 Rectangle {
                     x: 0;
-                    y: 14px;
+                    y: (parent.height - 8px) / 2;
                     width: 8px;
                     height: 8px;
                     border-radius: 4px;
                     background: TelemetryApi.status-state == 1 ? Theme.success-green
                         : (TelemetryApi.status-state == 2 ? Theme.warning-orange : Theme.text-dim);
                 }
-                Text {
+                VerticalLayout {
                     x: 16px;
-                    y: 4px;
-                    text: "DATA STRING";
-                    font-size: Theme.font-xs;
-                    font-weight: 700;
-                    color: Theme.text;
-                }
-                Text {
-                    x: 16px;
-                    y: 18px;
-                    text: TelemetryApi.status;
-                    font-size: Theme.font-xs;
-                    color: TelemetryApi.status-state == 1 ? Theme.success-green
-                        : (TelemetryApi.status-state == 2 ? Theme.warning-orange : Theme.text-dim);
+                    width: parent.width - 16px;
+                    height: parent.height;
+                    alignment: center;
+
+                    Text {
+                        text: "DATA STRING";
+                        font-size: Theme.font-xs;
+                        font-weight: 700;
+                        color: Theme.text;
+                    }
+                    Text {
+                        text: TelemetryApi.status;
+                        font-size: Theme.font-xs;
+                        color: TelemetryApi.status-state == 1 ? Theme.success-green
+                            : (TelemetryApi.status-state == 2 ? Theme.warning-orange : Theme.text-dim);
+                    }
                 }
             }
 
@@ -716,23 +815,31 @@ export component MainWindow inherits Window {
             // Spacer pushes the gear to the right edge.
             Rectangle { }
 
+            // Gear button: a full-height wrapper centers the 30x28 hover
+            // chip (fixed-height layout items top-pin otherwise).
             Rectangle {
                 width: 30px;
-                height: 28px;
-                border-radius: Theme.radius-sm;
-                background: gear-touch.has-hover ? Theme.border : transparent;
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "\u{2699}";
-                    font-size: 16px;
-                    color: Theme.text;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                gear-touch := TouchArea {
-                    mouse-cursor: MouseCursor.pointer;
-                    clicked => { TelemetryApi.open-dialog(); }
+                height: parent.height;
+
+                Rectangle {
+                    y: (parent.height - 28px) / 2;
+                    width: 30px;
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: gear-touch.has-hover ? Theme.border : transparent;
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "\u{2699}";
+                        font-size: 16px;
+                        color: Theme.text;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    gear-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => { TelemetryApi.open-dialog(); }
+                    }
                 }
             }
         }
@@ -770,6 +877,9 @@ export component MainWindow inherits Window {
 
     // ---- Data-string settings dialog (gear on the bottom bar) ----
     TelemetryDialog { }
+
+    // ---- Scene manager dialog (gear on the scene bar above the canvas) ----
+    SceneDialog { }
 
     // ---- Source-properties modal (topmost; hidden unless open) ----
     SourcePropertiesDialog { }
