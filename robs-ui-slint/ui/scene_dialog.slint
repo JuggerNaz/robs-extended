@@ -1,7 +1,8 @@
 //! Scene manager dialog (opened by the gear on the scene bar above the
-//! canvas): pick a scene to rename or remove, or add a new one (reusing the
-//! `SourcesApi.add-scene` command the old Scenes tab drove). A centered card
-//! over a click-away backdrop, matching the other shell dialogs.
+//! canvas). Clean single-purpose layout: title + close (top, justified), a
+//! scene list with per-row trash removal, inline rename on row click, and a
+//! full-width ADD SCENE action. Icons are drawn as `Path` strokes — the shell
+//! font renders most symbol codepoints as tofu.
 
 import { Theme } from "theme.slint";
 import { Api } from "api.slint";
@@ -9,15 +10,51 @@ import { SourcesApi } from "sources_api.slint";
 import { SceneApi } from "scene_api.slint";
 import { ListView, LineEdit } from "std-widgets.slint";
 
+// Drawn X close glyph (two strokes) — U+2715 is tofu in the shell font.
+component CloseIcon inherits Path {
+    width: 10px;
+    height: 10px;
+    viewbox-width: 10;
+    viewbox-height: 10;
+    commands: "M 0 0 L 10 10 M 10 0 L 0 10";
+    stroke: Theme.text-dim;
+    stroke-width: 1.5px;
+    fill: transparent;
+}
+
+// Drawn trash-can glyph (lid, handle, body) as stroked lines, with its
+// click/hover area — TouchArea cannot nest inside Path, so the Path and the
+// interaction area live as siblings inside this wrapper.
+component TrashButton inherits Rectangle {
+    width: 26px;
+
+    trash-touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+    }
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 12px;
+        height: 12px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        commands: "M 1.5 3 L 10.5 3 M 4.5 3 L 4.5 1.5 L 7.5 1.5 L 7.5 3 M 3 3 L 3.5 10.5 L 8.5 10.5 L 9 3";
+        stroke: trash-touch.has-hover ? Theme.live-red : Theme.text-dim;
+        stroke-width: 1.2px;
+        fill: transparent;
+    }
+}
+
 export component SceneDialog inherits Rectangle {
     background: #00000080;
     visible: SceneApi.dialog-open;
 
-    // A row is targetable once one was clicked in the list.
-    property <bool> row-picked: SceneApi.selected-index >= 0
-        && SceneApi.selected-index < Api.scene-names.length;
+    function commit-rename(name: string) {
+        SceneApi.rename-scene(name, SceneApi.edit-name);
+        SceneApi.selected-index = -1;
+    }
 
-    // Click-away backdrop closes (rename/remove are explicit actions).
+    // Click-away backdrop closes the dialog.
     TouchArea {
         clicked => { SceneApi.dialog-open = false; }
 
@@ -25,7 +62,7 @@ export component SceneDialog inherits Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: 360px;
-            height: 330px;
+            height: 320px;
             border-radius: Theme.radius;
             background: Theme.card;
             border-width: 1px;
@@ -38,10 +75,9 @@ export component SceneDialog inherits Rectangle {
                 padding: Theme.spacing-md;
                 spacing: Theme.spacing-sm;
 
-                // ---- Title row ----
+                // ---- Title row: SCENES ... close (justified) ----
                 HorizontalLayout {
                     height: 24px;
-                    alignment: start;
                     spacing: Theme.spacing-sm;
 
                     Text {
@@ -57,23 +93,19 @@ export component SceneDialog inherits Rectangle {
                         height: 24px;
                         border-radius: Theme.radius-sm;
                         background: close-touch.has-hover ? Theme.border : transparent;
-                        Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: "\u{2715}";
-                            font-size: Theme.font-sm;
-                            color: Theme.text-dim;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+
+                        CloseIcon {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
                         }
                         close-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
                             clicked => { SceneApi.dialog-open = false; }
                         }
                     }
                 }
 
-                // ---- Scene list (current scene highlighted like the old
-                // tab; the clicked row gets the accent border) ----
+                // ---- Scene list: click to inline-rename, trash to remove ----
                 Rectangle {
                     vertical-stretch: 1;
 
@@ -84,147 +116,77 @@ export component SceneDialog inherits Rectangle {
                         height: parent.height;
 
                         for name[i] in Api.scene-names: Rectangle {
-                            height: 30px;
+                            height: 36px;
                             border-radius: Theme.radius-sm;
-                            border-width: 1px;
-                            border-color: SceneApi.selected-index == i ? Theme.accent : transparent;
-                            background: name == Api.selected-scene ? Theme.accent
-                                : (row-touch.has-hover ? Theme.card-alt : Theme.card);
+                            background: row-touch.has-hover ? Theme.card-alt : Theme.card;
 
                             row-touch := TouchArea {
-                                mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+                                mouse-cursor: MouseCursor.pointer;
                                 clicked => {
                                     SceneApi.selected-index = i;
                                     SceneApi.edit-name = name;
                                 }
                             }
-                            Text {
+
+                            HorizontalLayout {
                                 x: Theme.spacing-sm;
                                 width: parent.width - 2 * Theme.spacing-sm;
                                 height: parent.height;
-                                text: name;
-                                font-size: Theme.font-sm;
-                                color: name == Api.selected-scene ? white : Theme.text;
-                                vertical-alignment: center;
-                                overflow: elide;
+                                spacing: Theme.spacing-xs;
+
+                                // Name (or the inline rename editor for the
+                                // row being edited).
+                                if SceneApi.selected-index == i: LineEdit {
+                                    width: parent.width - 34px;
+                                    y: (parent.height - self.preferred-height) / 2;
+                                    text <=> SceneApi.edit-name;
+                                    placeholder-text: "scene name";
+                                    accepted(text) => { root.commit-rename(name); }
+                                }
+                                if SceneApi.selected-index != i: Text {
+                                    width: parent.width - 34px;
+                                    height: parent.height;
+                                    text: name;
+                                    font-size: Theme.font-sm;
+                                    color: name == Api.selected-scene ? Theme.accent-hover : Theme.text;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+
+                                // Trash: remove this scene (glue no-ops on
+                                // the last remaining scene).
+                                TrashButton {
+                                    TouchArea {
+                                        clicked => {
+                                            SceneApi.selected-index = -1;
+                                            SceneApi.remove-scene(name);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                // ---- Rename editor ----
-                HorizontalLayout {
-                    height: 30px;
-                    spacing: Theme.spacing-sm;
+                // ---- Add: full-width action ----
+                Rectangle {
+                    height: 34px;
+                    border-radius: Theme.radius-sm;
+                    background: add-touch.has-hover ? Theme.accent-hover : Theme.accent;
 
-                    LineEdit {
-                        text <=> SceneApi.edit-name;
-                        placeholder-text: "scene name";
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "+ ADD SCENE";
+                        font-size: Theme.font-sm;
+                        font-weight: 700;
+                        color: white;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
-                    Rectangle {
-                        width: 86px;
-                        height: 30px;
-                        border-radius: Theme.radius-sm;
-                        background: row-picked && SceneApi.edit-name != ""
-                            ? (rename-touch.has-hover ? Theme.accent-hover : Theme.accent)
-                            : Theme.window;
-                        border-width: 1px;
-                        border-color: Theme.border;
-                        Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: "RENAME";
-                            font-size: Theme.font-sm;
-                            color: row-picked && SceneApi.edit-name != "" ? white : Theme.text-dim;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        rename-touch := TouchArea {
-                            enabled: row-picked && SceneApi.edit-name != "";
-                            mouse-cursor: self.has-hover && self.enabled ? MouseCursor.pointer : MouseCursor.default;
-                            clicked => {
-                                SceneApi.rename-scene(
-                                    Api.scene-names[SceneApi.selected-index],
-                                    SceneApi.edit-name);
-                                SceneApi.selected-index = -1;
-                            }
-                        }
-                    }
-                }
-
-                // ---- Actions: add / remove on the left, close on the right ----
-                HorizontalLayout {
-                    height: 32px;
-                    spacing: Theme.spacing-sm;
-
-                    Rectangle {
-                        width: 96px;
-                        height: 32px;
-                        border-radius: Theme.radius-sm;
-                        background: add-touch.has-hover ? Theme.accent-hover : Theme.accent;
-                        Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: "+ ADD SCENE";
-                            font-size: Theme.font-sm;
-                            color: white;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        add-touch := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
-                            // Same command the old Scenes tab used: creates
-                            // "Scene N" and makes it current.
-                            clicked => { SourcesApi.add-scene(); }
-                        }
-                    }
-                    Rectangle {
-                        width: 96px;
-                        height: 32px;
-                        border-radius: Theme.radius-sm;
-                        background: row-picked ? Theme.live-red : Theme.window;
-                        border-width: 1px;
-                        border-color: Theme.border;
-                        Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: "REMOVE";
-                            font-size: Theme.font-sm;
-                            color: row-picked ? white : Theme.text-dim;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        remove-touch := TouchArea {
-                            enabled: row-picked;
-                            mouse-cursor: self.has-hover && self.enabled ? MouseCursor.pointer : MouseCursor.default;
-                            clicked => {
-                                SceneApi.remove-scene(Api.scene-names[SceneApi.selected-index]);
-                                SceneApi.selected-index = -1;
-                                SceneApi.edit-name = "";
-                            }
-                        }
-                    }
-                    Rectangle { }
-                    Rectangle {
-                        width: 86px;
-                        height: 32px;
-                        border-radius: Theme.radius-sm;
-                        background: done-touch.has-hover ? Theme.border : Theme.card-alt;
-                        border-width: 1px;
-                        border-color: Theme.border;
-                        Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: "CLOSE";
-                            font-size: Theme.font-sm;
-                            color: Theme.text;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        done-touch := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
-                            clicked => { SceneApi.dialog-open = false; }
-                        }
+                    add-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => { SourcesApi.add-scene(); }
                     }
                 }
             }

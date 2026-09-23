@@ -38,4 +38,7 @@ export global QidApi {
     in property <string> db-status;
     // 0 = neutral, 1 = good (green), 2 = warn (orange).
     in property <int> db-status-state;
+
+    // True while a recording runs — the only time QID rows are clickable.
+    in property <bool> can-select;
 }

@@ -35,18 +35,15 @@ const SNAPSHOT_FLASH: Duration = Duration::from_millis(1500);
 /// canvas from these and the markup places the regions with the same values.
 pub mod layout {
     pub const TOPBAR_H: f32 = 40.0;
-    pub const RAIL_W: f32 = 220.0;
+    pub const RAIL_W: f32 = 260.0;
     pub const RIGHT_W: f32 = 300.0;
     pub const ACTIONS_H: f32 = 56.0;
-    /// Annotation toolbar strip height — mirrors `ui/theme.slint`
-    /// (`annotations-h`).
-    pub const TOOLBAR_H: f32 = 36.0;
     /// Bottom data-string telemetry bar height — mirrors `ui/theme.slint`
     /// (`data-h`).
-    pub const DATA_H: f32 = 44.0;
+    pub const DATA_H: f32 = 60.0;
     /// Scene selector bar above the canvas — mirrors `ui/theme.slint`
     /// (`scenebar-h`).
-    pub const SCENEBAR_H: f32 = 32.0;
+    pub const SCENEBAR_H: f32 = 44.0;
 }
 
 /// Handles to the models installed in `Api`, plus mirrors of the last pushed
@@ -206,18 +203,17 @@ pub fn push_state(
         panels.get_show_audio() || panels.get_show_chat() || panels.get_show_stats();
     let right_w = if right_shown { layout::RIGHT_W } else { 0.0 };
     let actions_h = if panels.get_show_controls() { layout::ACTIONS_H } else { 0.0 };
-    // The annotation toolbar inserts a strip below the top bar while shown
-    // (mirrors `annot-shift` in `ui/mainwindow.slint`).
-    let toolbar_h = if panels.get_show_annotations() { layout::TOOLBAR_H } else { 0.0 };
+    // The annotation toolbar lives inside the top bar (beside the hamburger
+    // menu), so unlike the old floating strip it does not shift the area.
     let area_x = rail_w;
     // The scene selector bar takes a strip at the top of the preview area
     // (always shown, mirrors the markup ordering above the letterbox).
-    let area_y = layout::TOPBAR_H + toolbar_h + layout::SCENEBAR_H;
+    let area_y = layout::TOPBAR_H + layout::SCENEBAR_H;
     let area_w = (win_w - rail_w - right_w).max(1.0);
     // The telemetry data bar sits at the very bottom and is always shown,
     // so its height is subtracted unconditionally (mirrors the markup),
     // as is the scene bar strip above the canvas.
-    let area_h = (win_h - layout::TOPBAR_H - toolbar_h - actions_h - layout::DATA_H
+    let area_h = (win_h - layout::TOPBAR_H - actions_h - layout::DATA_H
         - layout::SCENEBAR_H)
         .max(1.0);
 

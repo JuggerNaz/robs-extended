@@ -357,6 +357,7 @@ pub struct DatabaseSettings {
     /// lives in the user's config dir, never in the repo).
     pub url: String,
     /// `structure_components.structure_id` whose QIDs the rail loads.
+    /// `0` (the default) loads the components of EVERY structure.
     pub structure_id: i32,
     /// Master switch: load QIDs on launch and write segments on stop.
     pub enabled: bool,
@@ -450,8 +451,9 @@ impl DatabaseSettings {
     }
 
     /// True when the settings carry enough information to talk to the DB.
+    /// `structure_id == 0` means "all structures", so it is not required.
     pub fn is_configured(&self) -> bool {
-        self.enabled && !self.url.trim().is_empty() && self.structure_id > 0
+        self.enabled && !self.url.trim().is_empty()
     }
 }
 

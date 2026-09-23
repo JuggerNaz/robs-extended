@@ -50,11 +50,14 @@ pub fn install(
     // `api` borrows `comp`; both stay alive for the rest of this function.
     let api = comp.global::<QidApi>();
 
-    // ---- Row click: pre-select when idle; mark a segment while recording ----
+    // ---- Row click: mark a segment (only meaningful while recording) ----
     {
         let controller = Rc::clone(controller);
         api.on_select_qid(move |id: i32| {
-            controller.borrow_mut().qid_select(id as i64);
+            let mut controller = controller.borrow_mut();
+            if controller.record.recording {
+                controller.qid_select(id as i64);
+            }
         });
     }
 
@@ -140,4 +143,6 @@ pub fn push(component: &MainWindow, controller: &RobsController, qid_ui: &QidUi)
 
     api.set_db_status(qid.status.as_str().into());
     api.set_db_status_state(qid.status_state);
+    // Rows are clickable only while a recording runs (cursor/hover follow).
+    api.set_can_select(controller.record.recording);
 }

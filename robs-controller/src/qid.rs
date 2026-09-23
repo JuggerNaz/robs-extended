@@ -32,6 +32,9 @@ use super::RobsController;
 pub struct QidComponent {
     /// `structure_components.id`.
     pub id: i64,
+    /// `structure_components.structure_id` (the owning structure — used to
+    /// tag segments so "all structures" mode still records provenance).
+    pub structure_id: i32,
     /// `structure_components.q_id` (the display identity, e.g. `QID-2210-HP-101`).
     pub q_id: String,
     /// `structure_components.id_no` (sub-label under the QID).
@@ -54,6 +57,9 @@ pub struct SegmentAnchor {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct QidSegment {
     pub component_id: i64,
+    /// Structure owning the component (newer sidecars have this key; older
+    /// ones simply lack it — the file is a write-only recovery copy).
+    pub structure_id: i32,
     pub q_id: String,
     pub recording_path: String,
     pub wall_start: DateTime<Utc>,
@@ -89,6 +95,7 @@ pub enum QidSelectAction {
 pub fn close_segment(open: &OpenSegment, now: SegmentAnchor, recording_path: &str) -> QidSegment {
     QidSegment {
         component_id: open.component.id,
+        structure_id: open.component.structure_id,
         q_id: open.component.q_id.clone(),
         recording_path: recording_path.to_string(),
         wall_start: open.start.wall,
@@ -217,12 +224,14 @@ impl RobsController {
     pub fn refresh_qids(&mut self) {
         let Some(db) = &self.qid.db else {
             self.log_event(
-                "QID database not configured — set database.url + structure_id in settings.json",
+                "QID database not configured — set database.url (and optionally structure_id, 0 = all) in settings.json",
                 EventLogKind::Info,
             );
             return;
         };
-        let structure_id = self.qid.settings.structure_id;
+        // `structure_id == 0` means "all structures" (see `DatabaseSettings`).
+        let structure_id =
+            (self.qid.settings.structure_id > 0).then_some(self.qid.settings.structure_id);
         if db
             .tx
             .send(super::db::DbCommand::LoadComponents { structure_id })
@@ -233,9 +242,14 @@ impl RobsController {
         }
     }
 
-    /// QID rail click: pre-select when idle; close the open segment and
-    /// open a new one for the clicked QID while recording.
+    /// QID rail click: close the open segment and open a new one for the
+    /// clicked QID. Clicks only mark while a recording runs — idle clicks
+    /// are ignored (the rail shows this via the default cursor and no
+    /// hover highlight, see `qid_rail.slint`).
     pub fn qid_select(&mut self, component_id: i64) {
+        if !self.record.recording {
+            return;
+        }
         let Some(component) = self
             .qid
             .components
@@ -245,21 +259,6 @@ impl RobsController {
         else {
             return;
         };
-        if !self.record.recording {
-            // Pre-select: the segment opens automatically at recording start.
-            let changed = self.qid.current.as_ref().map(|c| c.id) != Some(component.id);
-            self.qid.current = Some(component.clone());
-            if changed {
-                self.log_event(
-                    format!(
-                        "QID selected: {} (marking starts with the next recording)",
-                        component.q_id
-                    ),
-                    EventLogKind::Record,
-                );
-            }
-            return;
-        }
 
         let anchors = now_anchor(self);
         let path = self.record.last_recording_path.clone();
@@ -294,14 +293,17 @@ impl RobsController {
                 closed = Some(seg);
             }
         }
+        // The CURRENT QID panel and row highlight follow the open segment.
+        self.qid.current = Some(component);
         if let Some(seg) = closed {
             self.qid.segments.push(seg);
             self.append_qid_sidecar();
         }
     }
 
-    /// Open a segment for the already-selected QID at recording start.
-    /// Called from `start_recording` after the session state resets.
+    /// Open a segment for the already-selected QID at recording start (the
+    /// selection persists from the previous session). Called from
+    /// `start_recording` after the session state resets.
     pub(crate) fn start_qid_session(&mut self) {
         self.qid.segments.clear();
         self.qid.open = self.qid.current.clone().map(|component| OpenSegment {
@@ -337,10 +339,9 @@ impl RobsController {
         }
         if self.qid.settings.is_configured() {
             if let Some(db) = &self.qid.db {
-                let structure_id = self.qid.settings.structure_id;
                 if db
                     .tx
-                    .send(super::db::DbCommand::InsertSegments { structure_id, segments })
+                    .send(super::db::DbCommand::InsertSegments { segments })
                     .is_ok()
                 {
                     self.qid.status = "SAVING".into();
@@ -447,6 +448,7 @@ mod tests {
     fn comp(id: i64, qid: &str) -> QidComponent {
         QidComponent {
             id,
+            structure_id: 211,
             q_id: qid.into(),
             id_no: "Face A1-A2".into(),
             code: "ANODE".into(),
@@ -475,6 +477,7 @@ mod tests {
         ) {
             QidSelectAction::Switched { closed, opened } => {
                 assert_eq!(closed.component_id, 1);
+                assert_eq!(closed.structure_id, 211);
                 assert_eq!(closed.wall_start.timestamp(), 100);
                 assert_eq!(closed.wall_end.timestamp(), 160);
                 assert_eq!(closed.elapsed_start_ms, 0);

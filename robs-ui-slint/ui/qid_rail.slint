@@ -1,9 +1,10 @@
 //! Left rail (MockupUI): the QID LIST from the inspection database
 //! (`structure_components.q_id`) plus the CURRENT QID panel. Replaces the
 //! former scenes rail, which moved into the right-column tabs (Scenes /
-//! Sources / Overlays). While a recording runs, clicking a QID marks
-//! "from the previous click to now" as belonging to the previous QID and
-//! opens a new segment for the clicked one (see `robs-controller/qid.rs`).
+//! Sources / Overlays). QID rows are clickable ONLY while a recording
+//! runs: clicking a QID then marks "from the previous click to now" as
+//! belonging to the previous QID and opens a new segment for the clicked
+//! one (see `robs-controller/qid.rs`).
 
 import { Theme } from "theme.slint";
 import { QidApi, QidRowView } from "qid_api.slint";
@@ -18,10 +19,12 @@ component QidRow inherits Rectangle {
     height: 42px;
     border-radius: Theme.radius-sm;
     background: root.entry.current ? #145A2D
-        : (touch.has-hover ? Theme.card-alt : transparent);
+        : ((touch.has-hover && QidApi.can-select) ? Theme.card-alt : transparent);
 
+    // Rows only respond while a recording runs (QidApi.can-select): the
+    // pointer cursor and hover highlight are suppressed when idle.
     touch := TouchArea {
-        mouse-cursor: MouseCursor.pointer;
+        mouse-cursor: QidApi.can-select ? MouseCursor.pointer : MouseCursor.default;
         clicked => { root.clicked(); }
     }
     HorizontalLayout {
@@ -29,13 +32,20 @@ component QidRow inherits Rectangle {
         padding-right: Theme.spacing-sm;
         spacing: Theme.spacing-sm;
 
-        // Status dot: green when current, dim otherwise.
+        // Status dot: green when current, dim otherwise. Full-height wrapper
+        // + explicit inner centering — fixed-height items top-pin in
+        // HorizontalLayouts (same idiom as the QUAD VIEW icon).
         Rectangle {
-            y: 1px;
             width: 10px;
-            height: 10px;
-            border-radius: 5px;
-            background: root.entry.current ? Theme.success-green : Theme.border;
+            height: parent.height;
+
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 5px;
+                background: root.entry.current ? Theme.success-green : Theme.border;
+            }
         }
         VerticalLayout {
             horizontal-stretch: 1;
@@ -66,7 +76,7 @@ export component QidRail inherits Rectangle {
     property <string> search-text;
 
     VerticalLayout {
-        padding: Theme.spacing-xs;
+        padding: Theme.spacing-sm;
         spacing: Theme.spacing-xs;
 
         // ---- Header: QID LIST + total + refresh + DB status dot ----

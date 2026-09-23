@@ -35,10 +35,13 @@ use super::qid::{QidComponent, QidSegment};
 
 /// One command for the worker thread.
 pub enum DbCommand {
-    /// Reload `structure_components` for `structure_id` (active rows only).
-    LoadComponents { structure_id: i32 },
-    /// Insert closed QID segments of one recording session (single transaction).
-    InsertSegments { structure_id: i32, segments: Vec<QidSegment> },
+    /// Reload `structure_components` (active rows only). `None` loads every
+    /// structure's rows (settings `structure_id: 0`).
+    LoadComponents { structure_id: Option<i32> },
+    /// Insert closed QID segments of one recording session (single
+    /// transaction). Each segment carries the `structure_id` of its
+    /// component, so mixed-structure sessions tag every row correctly.
+    InsertSegments { segments: Vec<QidSegment> },
 }
 
 /// One outcome from the worker thread, drained by the UI tick.
@@ -110,8 +113,8 @@ fn run_command(
         DbCommand::LoadComponents { structure_id } => load_components(client, *structure_id)
             .map(DbResult::Components)
             .unwrap_or_else(DbResult::ComponentsFailed),
-        DbCommand::InsertSegments { structure_id, segments } => {
-            insert_segments(client, *structure_id, segments)
+        DbCommand::InsertSegments { segments } => {
+            insert_segments(client, segments)
                 .map(|count| DbResult::SegmentsInserted { count })
                 .unwrap_or_else(|e| DbResult::SegmentsFailed {
                     error: e,
@@ -138,13 +141,26 @@ fn report_failure(res_tx: &Sender<DbResult>, command: &DbCommand, error: String)
     res_tx.send(result).ok();
 }
 
+/// Supabase's Postgres endpoints (the direct `db.<ref>.supabase.co` host and
+/// both poolers) present certificates signed by Supabase's own CA chain
+/// ("Supabase Root 2021 CA"), which is not publicly trusted — strict
+/// verifiers like native-tls/SChannel reject the chain with "error
+/// performing TLS handshake". The prod root is bundled here (the official
+/// `prod-ca-2021.crt` from the dashboard's SSL Configuration download) and
+/// added as an extra trust root for every connection.
+const SUPABASE_ROOT_CA: &[u8] = include_bytes!("../assets/prod-ca-2021.crt");
+
 /// Open a TLS Postgres connection to the configured URL.
 fn connect(settings: &DatabaseSettings) -> Result<Client, String> {
     let url = settings.url.trim();
     if url.is_empty() {
         return Err("database URL not configured (settings.json `database.url`)".into());
     }
-    let connector = native_tls::TlsConnector::new()
+    let ca = native_tls::Certificate::from_pem(SUPABASE_ROOT_CA)
+        .map_err(|e| format!("bundled Supabase CA is invalid: {e}"))?;
+    let connector = native_tls::TlsConnector::builder()
+        .add_root_certificate(ca)
+        .build()
         .map_err(|e| format!("TLS setup failed: {e}"))?;
     Client::connect(url, MakeTlsConnector::new(connector)).map_err(|e| {
         format!(
@@ -153,35 +169,47 @@ fn connect(settings: &DatabaseSettings) -> Result<Client, String> {
     })
 }
 
-/// `SELECT` the active `structure_components` rows for one structure,
-/// ordered by `q_id` (mirrors web-app-offshore's structure-components API).
-fn load_components(client: &mut Client, structure_id: i32) -> Result<Vec<QidComponent>, String> {
-    let rows = client
-        .query(
-            "SELECT id, q_id, COALESCE(id_no, ''), COALESCE(code, '') \
-             FROM structure_components \
-             WHERE structure_id = $1 AND is_deleted = false \
-             ORDER BY q_id",
-            &[&structure_id],
-        )
-        .map_err(|e| format!("load components failed: {e}"))?;
+/// `SELECT` the active `structure_components` rows, ordered by `q_id`
+/// (mirrors web-app-offshore's structure-components API). `None` loads
+/// every structure's rows. `q_id` is COALESCEd — NULLs would panic the
+/// `row.get` below, and some imported rows have no QID assigned yet.
+fn load_components(
+    client: &mut Client,
+    structure_id: Option<i32>,
+) -> Result<Vec<QidComponent>, String> {
+    let rows = match structure_id {
+        Some(id) => client
+            .query(
+                "SELECT id, structure_id, COALESCE(q_id, ''), COALESCE(id_no, ''), \
+                 COALESCE(code, '') FROM structure_components \
+                 WHERE structure_id = $1 AND is_deleted = false ORDER BY q_id",
+                &[&id],
+            )
+            .map_err(|e| format!("load components failed: {e}"))?,
+        None => client
+            .query(
+                "SELECT id, structure_id, COALESCE(q_id, ''), COALESCE(id_no, ''), \
+                 COALESCE(code, '') FROM structure_components \
+                 WHERE is_deleted = false ORDER BY q_id",
+                &[],
+            )
+            .map_err(|e| format!("load components failed: {e}"))?,
+    };
     Ok(rows
         .iter()
         .map(|row| QidComponent {
             id: row.get::<_, i64>(0),
-            q_id: row.get::<_, String>(1),
-            id_no: row.get::<_, String>(2),
-            code: row.get::<_, String>(3),
+            structure_id: row.get::<_, i32>(1),
+            q_id: row.get::<_, String>(2),
+            id_no: row.get::<_, String>(3),
+            code: row.get::<_, String>(4),
         })
         .collect())
 }
 
 /// Insert all segments of one recording session in a single transaction.
-fn insert_segments(
-    client: &mut Client,
-    structure_id: i32,
-    segments: &[QidSegment],
-) -> Result<usize, String> {
+/// Each segment is tagged with the structure that owns its component.
+fn insert_segments(client: &mut Client, segments: &[QidSegment]) -> Result<usize, String> {
     let mut tx = client
         .transaction()
         .map_err(|e| format!("transaction begin failed: {e}"))?;
@@ -193,7 +221,7 @@ fn insert_segments(
               frame_start, frame_end) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             &[
-                &(structure_id as i64),
+                &(segment.structure_id as i64),
                 &segment.component_id,
                 &segment.q_id,
                 &segment.recording_path,
@@ -209,4 +237,18 @@ fn insert_segments(
     }
     tx.commit().map_err(|e| format!("commit failed: {e}"))?;
     Ok(segments.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SUPABASE_ROOT_CA;
+
+    /// The bundled Supabase root CA must stay parseable PEM — a corrupted
+    /// or truncated asset would fail every DB connection at runtime.
+    #[test]
+    fn bundled_supabase_ca_parses() {
+        let cert = native_tls::Certificate::from_pem(SUPABASE_ROOT_CA)
+            .expect("bundled prod-ca-2021.crt should be valid PEM");
+        let _ = cert;
+    }
 }
