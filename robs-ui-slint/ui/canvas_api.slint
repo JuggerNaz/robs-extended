@@ -36,6 +36,13 @@ export struct CanvasTextView {
     font-size: float,
 }
 
+// One label/value row of the scene data-string overlay (named DsRow to
+// avoid clashing with the raster-side `DataStringRow`).
+export struct DsRow {
+    label: string,
+    value: string,
+}
+
 export global CanvasApi {
     // ---- Commands (UI -> glue) ----
     // Pointer traffic from the canvas overlay; coordinates are
@@ -100,4 +107,24 @@ export global CanvasApi {
     // True while a shape/pen/text tool is active (items stop being draggable,
     // handles hide — egui `draw_active` parity).
     in property <bool> draw-active;
+
+    // ---- Scene overlays: data string + company logo ----
+    // Baked into the composed output the same way; this is the live preview.
+    in property <bool> ds-visible;
+    // The two telemetry groups (bottom-left, bottom-right).
+    in property <[DsRow]> ds-rows-left;
+    in property <[DsRow]> ds-rows-right;
+    // Box inset from the canvas edges (canvas px).
+    in property <float> ds-inset;
+    in property <bool> logo-visible;
+    in property <image> logo-image;
+    // Logo top-left + rendered size in canvas px.
+    in property <float> logo-x;
+    in property <float> logo-y;
+    in property <float> logo-width;
+    in property <float> logo-height;
+    // Logo dragging (canvas-relative px, like the other pointer traffic).
+    callback logo-press(float, float);
+    callback logo-drag-to(float, float);
+    callback logo-release();
 }

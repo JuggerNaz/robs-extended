@@ -596,6 +596,97 @@ export component MainWindow inherits Window {
                 }
             }
 
+            // ---- Scene overlays (baked into the output the same way) ----
+            // Data-string boxes: telemetry rows in the bottom corners.
+            if CanvasApi.ds-visible: Rectangle {
+                x: CanvasApi.ds-inset * 1px;
+                y: parent.height - self.height - CanvasApi.ds-inset * 1px;
+                width: ds-left-col.preferred-width + 20px;
+                height: ds-left-col.preferred-height + 14px;
+                background: #000000A0;
+                border-radius: 4px;
+
+                ds-left-col := VerticalLayout {
+                    padding: 7px;
+                    spacing: 4px;
+                    for row in CanvasApi.ds-rows-left: HorizontalLayout {
+                        spacing: 12px;
+                        Text {
+                            width: 92px;
+                            text: row.label;
+                            font-size: Theme.font-xs;
+                            color: Theme.text-dim;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: row.value;
+                            font-size: Theme.font-xs;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            if CanvasApi.ds-visible: Rectangle {
+                x: parent.width - self.width - CanvasApi.ds-inset * 1px;
+                y: parent.height - self.height - CanvasApi.ds-inset * 1px;
+                width: ds-right-col.preferred-width + 20px;
+                height: ds-right-col.preferred-height + 14px;
+                background: #000000A0;
+                border-radius: 4px;
+
+                ds-right-col := VerticalLayout {
+                    padding: 7px;
+                    spacing: 4px;
+                    for row in CanvasApi.ds-rows-right: HorizontalLayout {
+                        spacing: 12px;
+                        Text {
+                            width: 96px;
+                            text: row.label;
+                            font-size: Theme.font-xs;
+                            color: Theme.text-dim;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: row.value;
+                            font-size: Theme.font-xs;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            // Company logo — draggable via its own TouchArea layered on top
+            // of the Image (canvas-px coordinates like the other tools).
+            if CanvasApi.logo-visible: Rectangle {
+                x: CanvasApi.logo-x * 1px;
+                y: CanvasApi.logo-y * 1px;
+                width: CanvasApi.logo-width * 1px;
+                height: CanvasApi.logo-height * 1px;
+
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: CanvasApi.logo-image;
+                }
+                TouchArea {
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down) {
+                            CanvasApi.logo-press(self.mouse-x / 1px, self.mouse-y / 1px);
+                        }
+                        if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                            CanvasApi.logo-release();
+                        }
+                    }
+                    changed mouse-x => {
+                        if (self.pressed) { CanvasApi.logo-drag-to(self.mouse-x / 1px, self.mouse-y / 1px); }
+                    }
+                    changed mouse-y => {
+                        if (self.pressed) { CanvasApi.logo-drag-to(self.mouse-x / 1px, self.mouse-y / 1px); }
+                    }
+                }
+            }
+
             // Selected item corner handles (drag near a corner to resize —
             // the handles themselves are visuals only, like the egui ones).
             if annot-shown && CanvasApi.selected-item-index >= 0 && !CanvasApi.draw-active: Rectangle {

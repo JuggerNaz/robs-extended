@@ -228,6 +228,47 @@ impl TelemetryState {
     }
 }
 
+/// Decoded logo image for the company-logo scene overlay.
+pub struct LogoImage {
+    /// RGBA8 pixels, row-major, `width * height * 4` bytes.
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// Source file path (also persisted as the overlay setting).
+    pub path: String,
+}
+
+/// Scene-overlay state: the bottom data-string boxes and the company logo.
+/// Both are baked into the composed output frame (`capture.rs`) and
+/// previewed on the canvas (`push.rs` / `mainwindow.slint`).
+pub struct OverlayState {
+    /// Render the data-string boxes on the composed output (default on).
+    pub data_string_enabled: bool,
+    /// Render the company logo (only meaningful with a loaded logo).
+    pub logo_enabled: bool,
+    /// Decoded logo pixels (`None` until a file is picked successfully).
+    pub logo: Option<LogoImage>,
+    /// Logo resized for the current output height (cache: `(w, h, rgba)`).
+    pub logo_resized: Option<(u32, u32, Vec<u8>)>,
+    /// Logo top-left position in scene coordinates.
+    pub logo_position: robs_core::Position,
+    /// Logo height as a fraction of the output height (0.02..=0.5).
+    pub logo_height_fraction: f32,
+}
+
+impl Default for OverlayState {
+    fn default() -> Self {
+        Self {
+            data_string_enabled: true,
+            logo_enabled: false,
+            logo: None,
+            logo_resized: None,
+            logo_position: robs_core::Position::zero(),
+            logo_height_fraction: 0.08,
+        }
+    }
+}
+
 /// Source-properties modal editing state.
 pub struct EditingState {
     pub show_source_properties: bool,

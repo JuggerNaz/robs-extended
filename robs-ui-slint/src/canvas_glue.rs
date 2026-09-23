@@ -58,6 +58,8 @@ pub struct CanvasUi {
     item_scale0: (f32, f32),
     /// Item rendered size in canvas px at press (ResizeItem).
     item_dims0: (f32, f32),
+    /// Logo drag: `(grab canvas px, logo scene origin at press)`.
+    logo_grab: Option<(f32, f32, f32, f32)>,
 }
 
 impl CanvasUi {
@@ -68,6 +70,7 @@ impl CanvasUi {
             item_pos0: Position::zero(),
             item_scale0: (1.0, 1.0),
             item_dims0: (0.0, 0.0),
+            logo_grab: None,
         }
     }
 }
@@ -377,6 +380,48 @@ pub fn install(
             let mut c = controller.borrow_mut();
             c.annotation.annotations.clear();
             c.annotation.selected_annotation = None;
+        });
+    }
+
+    // ---- Scene overlay: logo dragging ----
+    {
+        let controller = Rc::clone(controller);
+        let state = Rc::clone(state);
+        api.on_logo_press(move |px: f32, py: f32| {
+            let c = controller.borrow();
+            let origin = c.overlay.logo_position;
+            state.borrow_mut().logo_grab = Some((px, py, origin.x, origin.y));
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        let state = Rc::clone(state);
+        let pushed = Rc::clone(pushed);
+        api.on_logo_drag_to(move |px: f32, py: f32| {
+            let Some((gx, gy, ox, oy)) = state.borrow().logo_grab else {
+                return;
+            };
+            let scale = pushed.borrow().canvas.scale.max(0.0001);
+            let mut c = controller.borrow_mut();
+            let (scene_w, scene_h) = c
+                .scenes
+                .current_scene()
+                .map(|s| s.output_size())
+                .unwrap_or((1920, 1080));
+            // Canvas-px delta -> scene units, clamped to the scene bounds.
+            let nx = ox + (px - gx) / scale;
+            let ny = oy + (py - gy) / scale;
+            c.overlay.logo_position =
+                Position::new(nx.clamp(0.0, scene_w as f32), ny.clamp(0.0, scene_h as f32));
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        let state = Rc::clone(state);
+        api.on_logo_release(move || {
+            state.borrow_mut().logo_grab = None;
+            // Persist placement when the drag gesture completes.
+            controller.borrow_mut().save_overlay_settings();
         });
     }
 }

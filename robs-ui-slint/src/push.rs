@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use crate::canvas_glue::{ann_bbox, path_commands, tool_index, TEXT_FONT_SIZE};
 use crate::{
-    AnnotationView, Api, CanvasApi, CanvasTextView, LogLineView, MainWindow, PanelsApi,
+    AnnotationView, Api, CanvasApi, CanvasTextView, DsRow, LogLineView, MainWindow, PanelsApi,
     SceneItemView,
 };
+use robs_controller::annotation_raster::DataStringRow;
 use robs_controller::state::{EventLogEntry, EventLogKind, PreviewFrame};
 use robs_controller::RobsController;
 use robs_core::{AnnotationShape, SceneItemId};
@@ -72,6 +73,10 @@ pub struct PushedState {
     ann_mirror: Vec<AnnSig>,
     /// Signature of the last pushed overlay model.
     overlay_mirror: Vec<OverlaySig>,
+    /// Signature of the last pushed data-string groups `(label, value)`.
+    ds_mirror: Vec<Vec<(String, String)>>,
+    /// Logo source path behind the pushed `logo-image` (rebuilt on change).
+    logo_mirror: Option<String>,
     /// Editing-active at the previous push (seeds `text-input` on rising edge).
     editing_prev: bool,
 }
@@ -145,6 +150,8 @@ impl PushedState {
             canvas: CanvasGeom { scale: 1.0 },
             ann_mirror: Vec::new(),
             overlay_mirror: Vec::new(),
+            ds_mirror: Vec::new(),
+            logo_mirror: None,
             editing_prev: false,
         }
     }
@@ -565,6 +572,56 @@ fn push_canvas(
     if overlay_sigs != pushed.overlay_mirror {
         pushed.overlay_mirror = overlay_sigs;
         api.set_text_overlays(ModelRc::new(VecModel::from(overlay_rows)));
+    }
+
+    // ---- Scene overlays: data string + company logo ----
+    api.set_ds_visible(controller.overlay.data_string_enabled);
+    api.set_ds_inset(16.0 * scale);
+    if controller.overlay.data_string_enabled {
+        let groups = controller.data_string_rows();
+        let sig: Vec<Vec<(String, String)>> = groups
+            .iter()
+            .map(|g| g.iter().map(|r| (r.label.clone(), r.value.clone())).collect())
+            .collect();
+        if sig != pushed.ds_mirror {
+            pushed.ds_mirror = sig;
+            let to_rows = |rows: Option<&Vec<DataStringRow>>| -> Vec<DsRow> {
+                rows.map(|g| {
+                    g.iter()
+                        .map(|r| DsRow {
+                            label: r.label.as_str().into(),
+                            value: r.value.as_str().into(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+            };
+            api.set_ds_rows_left(ModelRc::new(VecModel::from(to_rows(groups.first()))));
+            api.set_ds_rows_right(ModelRc::new(VecModel::from(to_rows(groups.get(1)))));
+        }
+    }
+    api.set_logo_visible(controller.overlay.logo_enabled && controller.overlay.logo.is_some());
+    if let Some(logo) = controller.overlay.logo.as_ref() {
+        // The Slint image is rebuilt only when the logo FILE changes.
+        if pushed.logo_mirror.as_deref() != Some(logo.path.as_str()) {
+            let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                &logo.rgba,
+                logo.width,
+                logo.height,
+            );
+            api.set_logo_image(Image::from_rgba8(buffer));
+            pushed.logo_mirror = Some(logo.path.clone());
+        }
+        // Geometry mirrors the compose path: scene position -> canvas px,
+        // height = fraction of the scene height, aspect preserved.
+        let h = controller.overlay.logo_height_fraction.clamp(0.02, 0.5)
+            * scene_h as f32
+            * scale;
+        let w = h * logo.width.max(1) as f32 / logo.height.max(1) as f32;
+        api.set_logo_x(controller.overlay.logo_position.x * scale);
+        api.set_logo_y(controller.overlay.logo_position.y * scale);
+        api.set_logo_width(w);
+        api.set_logo_height(h);
     }
 
     // ---- Inline text editor ----

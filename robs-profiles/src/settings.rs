@@ -457,6 +457,117 @@ impl DatabaseSettings {
     }
 }
 
+/// Settings for the scene overlays: the bottom data-string boxes and the
+/// company logo (`overlay` section of settings.json).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Missing fields deserialize to the struct defaults, so a partial or
+/// hand-edited `overlay` section still loads.
+#[serde(default)]
+pub struct OverlaySettings {
+    /// Bake the data-string boxes into the scene output.
+    pub data_string_enabled: bool,
+    /// Render the company logo on the scene output.
+    pub logo_enabled: bool,
+    /// Logo image file path (empty = none chosen yet).
+    pub logo_path: String,
+    /// Logo top-left in scene coordinates.
+    pub logo_x: f32,
+    pub logo_y: f32,
+    /// Logo height as a fraction of the scene output height.
+    pub logo_height_fraction: f32,
+}
+
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        Self {
+            data_string_enabled: true,
+            logo_enabled: false,
+            logo_path: String::new(),
+            logo_x: 24.0,
+            logo_y: 24.0,
+            logo_height_fraction: 0.08,
+        }
+    }
+}
+
+impl OverlaySettings {
+    /// Load the `overlay` section from the canonical settings file,
+    /// mirroring [`SerialTelemetrySettings::load_or_default`]: present
+    /// section wins (missing fields fall back via `#[serde(default)]`),
+    /// absent section seeds defaults once, unreadable section warns.
+    pub fn load_or_default() -> Self {
+        let Some(path) = settings_file_path() else {
+            return Self::default();
+        };
+        let (settings, seed) = Self::resolve_from(&path);
+        if let Some(seed) = seed {
+            // Best-effort: seeding only materializes the defaults on disk.
+            let _ = seed.save_to(&path);
+        }
+        settings
+    }
+
+    /// Classify `path` and choose the settings to run with, plus an optional
+    /// defaults bundle to seed an absent section with. Pure — no disk writes
+    /// and no stderr on the happy paths — so it can be unit-tested against
+    /// temp files instead of the real config dir.
+    fn resolve_from(path: &Path) -> (Self, Option<Self>) {
+        match read_section(path, "overlay") {
+            SectionRead::Present(value) => match serde_json::from_value(value) {
+                Ok(settings) => (settings, None),
+                Err(_) => (Self::warn_unreadable(path), None),
+            },
+            SectionRead::Absent => {
+                let defaults = Self::default();
+                (defaults.clone(), Some(defaults))
+            }
+            SectionRead::Unreadable => (Self::warn_unreadable(path), None),
+        }
+    }
+
+    fn warn_unreadable(path: &Path) -> Self {
+        eprintln!(
+            "[Settings] overlay settings unreadable, using defaults: {}",
+            path.display()
+        );
+        Self::default()
+    }
+
+    /// Persist the `overlay` section to the canonical settings file.
+    pub fn save(&self) -> Result<()> {
+        let path = settings_file_path().context("could not determine the config directory")?;
+        self.save_to(&path)
+    }
+
+    /// Read the `overlay` section of the JSON object at `path`. `None` when
+    /// the file is missing, unreadable, invalid JSON, or has no `overlay` key.
+    pub fn load_from(path: &Path) -> Option<Self> {
+        match read_section(path, "overlay") {
+            SectionRead::Present(value) => serde_json::from_value(value).ok(),
+            _ => None,
+        }
+    }
+
+    /// Write the `overlay` section into the JSON object at `path`, preserving
+    /// every other section already present.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        let mut root: serde_json::Value = fs::read_to_string(path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let obj = root
+            .as_object_mut()
+            .context("settings file root is not a JSON object")?;
+        obj.insert("overlay".into(), serde_json::to_value(self)?);
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(&root)?)?;
+        Ok(())
+    }
+}
+
 /// Canonical settings file: `<config_dir>/settings.json`, sibling of the
 /// `profiles/` directory `ProfileManager` uses (same `ProjectDirs` root).
 pub fn settings_file_path() -> Option<PathBuf> {

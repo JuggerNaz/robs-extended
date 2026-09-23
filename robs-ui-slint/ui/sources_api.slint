@@ -31,6 +31,11 @@ export global SourcesApi {
     callback add-overlay(string);
     callback remove-overlay(int);
     callback set-overlay-visible(int, bool);
+    // Scene overlays: data-string boxes + company logo.
+    callback set-data-string-overlay(bool);
+    callback set-logo-enabled(bool);
+    callback choose-logo();
+    callback set-logo-size(float);
 
     // Source-properties dialog: reads the in-out fields, writes them back.
     callback apply-properties();
@@ -42,6 +47,13 @@ export global SourcesApi {
     in property <[string]> camera-names;
     in property <[SourceRowView]> source-rows;
     in property <[OverlayView]> overlays;
+    // Scene-overlay mirrors (glue -> UI).
+    in property <bool> data-string-on;
+    in property <bool> logo-on;
+    in property <bool> has-logo;
+    in property <string> logo-name;
+    // Logo height in percent of the scene height (slider range 4..20).
+    in-out property <float> logo-size-percent;
 
     // ---- Properties dialog (glue seeds on open, dialog edits, glue reads on
     // apply). Values are strings so the LineEdits can bind two-way. ----

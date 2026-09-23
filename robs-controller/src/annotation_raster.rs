@@ -316,6 +316,160 @@ fn fill_rect(frame: &mut [u8], w: u32, h: u32, x0: f32, y0: f32, x1: f32, y1: f3
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scene overlays: data-string boxes + company logo
+// ---------------------------------------------------------------------------
+
+/// One label/value row of the data-string overlay.
+pub struct DataStringRow {
+    pub label: String,
+    pub value: String,
+}
+
+/// Data-string layout constants (scene units, scaled like coordinates).
+const DS_FONT_SIZE: f32 = 22.0;
+const DS_ROW_HEIGHT: f32 = 30.0;
+const DS_PAD: f32 = 12.0;
+const DS_INSET: f32 = 16.0;
+const DS_LABEL_GAP: f32 = 14.0;
+const DS_BACKDROP: [u8; 4] = [0, 0, 0, 160];
+const DS_LABEL_COLOR: [u8; 4] = [160, 160, 160, 255];
+const DS_VALUE_COLOR: [u8; 4] = [255, 255, 255, 255];
+
+/// Rendered width of `text` at `size` px (sum of glyph advances).
+fn measure_text(font: &FontVec, text: &str, size: f32) -> f32 {
+    let scaled = font.as_scaled(PxScale::from(size));
+    text.chars()
+        .map(|ch| {
+            let gid = scaled.glyph_id(ch);
+            scaled.h_advance(gid)
+        })
+        .sum()
+}
+
+/// Composite the data-string overlay: one semi-transparent box per group —
+/// the first anchored bottom-left, the second bottom-right. Rows render as
+/// `LABEL` + `VALUE` in two columns (the label column sized by the widest
+/// label), matching the ROV mockup. No-op without a font or with empty
+/// groups.
+pub fn composite_data_string(
+    frame: &mut [u8],
+    frame_w: u32,
+    frame_h: u32,
+    groups: &[Vec<DataStringRow>],
+    scale_x: f32,
+    scale_y: f32,
+    font: Option<&FontVec>,
+) {
+    let Some(font) = font else { return };
+    let font_size = DS_FONT_SIZE * scale_x;
+    let row_h = DS_ROW_HEIGHT * scale_y;
+    let pad = DS_PAD * scale_x;
+    let inset = DS_INSET * scale_x;
+    let gap = DS_LABEL_GAP * scale_x;
+    for (group_idx, rows) in groups.iter().enumerate().take(2) {
+        if rows.is_empty() {
+            continue;
+        }
+        let label_w = rows
+            .iter()
+            .map(|r| measure_text(font, &r.label, font_size))
+            .fold(0.0_f32, f32::max);
+        let value_w = rows
+            .iter()
+            .map(|r| measure_text(font, &r.value, font_size))
+            .fold(0.0_f32, f32::max);
+        let box_w = pad * 2.0 + label_w + gap + value_w;
+        let box_h = pad * 2.0 + row_h * rows.len() as f32;
+        let box_x = if group_idx == 0 {
+            inset
+        } else {
+            (frame_w as f32 - inset - box_w).max(0.0)
+        };
+        let box_y = (frame_h as f32 - inset - box_h).max(0.0);
+        fill_rect(
+            frame,
+            frame_w,
+            frame_h,
+            box_x,
+            box_y,
+            box_x + box_w,
+            box_y + box_h,
+            DS_BACKDROP,
+        );
+        let value_x = box_x + pad + label_w + gap;
+        for (i, row) in rows.iter().enumerate() {
+            let text_y = box_y + pad + row_h * i as f32;
+            render_text(
+                frame,
+                frame_w,
+                frame_h,
+                font,
+                box_x + pad,
+                text_y,
+                &row.label,
+                DS_LABEL_COLOR,
+                font_size,
+            );
+            render_text(
+                frame,
+                frame_w,
+                frame_h,
+                font,
+                value_x,
+                text_y,
+                &row.value,
+                DS_VALUE_COLOR,
+                font_size,
+            );
+        }
+    }
+}
+
+/// Alpha-blend an RGBA8 logo onto the RGBA8 frame at frame-pixel `(x, y)`.
+/// Fully transparent logo pixels leave the frame untouched.
+pub fn composite_logo(
+    frame: &mut [u8],
+    frame_w: u32,
+    frame_h: u32,
+    logo_rgba: &[u8],
+    logo_w: u32,
+    logo_h: u32,
+    x: f32,
+    y: f32,
+) {
+    let x0 = x.floor() as i64;
+    let y0 = y.floor() as i64;
+    for ly in 0..logo_h as i64 {
+        let fy = y0 + ly;
+        if fy < 0 || fy >= frame_h as i64 {
+            continue;
+        }
+        for lx in 0..logo_w as i64 {
+            let fx = x0 + lx;
+            if fx < 0 || fx >= frame_w as i64 {
+                continue;
+            }
+            let src = ((ly * logo_w as i64 + lx) * 4) as usize;
+            if src + 3 >= logo_rgba.len() {
+                continue;
+            }
+            let alpha = logo_rgba[src + 3];
+            if alpha == 0 {
+                continue;
+            }
+            put_pixel(
+                frame,
+                frame_w,
+                frame_h,
+                fx as i32,
+                fy as i32,
+                [logo_rgba[src], logo_rgba[src + 1], logo_rgba[src + 2], alpha],
+            );
+        }
+    }
+}
+
 /// Fill an ellipse via per-row scanline extents.
 fn fill_ellipse(
     frame: &mut [u8],
@@ -345,5 +499,61 @@ fn fill_ellipse(
             }
         }
         y += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_string_darkens_bottom_left_and_leaves_rest_clean() {
+        let Some(font) = load_system_font() else {
+            return; // font discovery is environment-dependent
+        };
+        let (w, h) = (400u32, 300u32);
+        let mut frame = vec![255u8; (w * h * 4) as usize];
+        let groups = vec![vec![DataStringRow {
+            label: "EASTING".to_string(),
+            value: "123456 m".to_string(),
+        }]];
+        composite_data_string(&mut frame, w, h, &groups, 1.0, 1.0, Some(&font));
+        let px = |x: u32, y: u32| frame[((y * w + x) * 4) as usize];
+        // Inside the bottom-left box but left of the label pen (in the
+        // backdrop padding): darkened by the translucent backdrop.
+        assert!(
+            px(24, 260) < 200,
+            "expected a darkened pixel inside the data-string box"
+        );
+        // Well above the box: untouched.
+        assert_eq!(px(24, 100), 255);
+    }
+
+    #[test]
+    fn data_string_without_font_or_rows_is_a_noop() {
+        let (w, h) = (64u32, 64u32);
+        let mut frame = vec![7u8; (w * h * 4) as usize];
+        let before = frame.clone();
+        composite_data_string(&mut frame, w, h, &[], 1.0, 1.0, None);
+        assert_eq!(frame, before);
+    }
+
+    #[test]
+    fn composite_logo_blends_opaque_pixels_only() {
+        let (w, h) = (16u32, 16u32);
+        let mut frame = vec![0u8; (w * h * 4) as usize];
+        // 2x2 fully opaque red logo at (10, 10).
+        let logo = vec![
+            255u8, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+        ];
+        composite_logo(&mut frame, w, h, &logo, 2, 2, 10.0, 10.0);
+        let px = |x: u32, y: u32| {
+            let o = ((y * w + x) * 4) as usize;
+            (frame[o], frame[o + 1], frame[o + 2], frame[o + 3])
+        };
+        assert_eq!(px(10, 10), (255, 0, 0, 255));
+        assert_eq!(px(11, 11), (255, 0, 0, 255));
+        // Nothing outside the logo footprint was touched.
+        assert_eq!(px(12, 12), (0, 0, 0, 0));
     }
 }

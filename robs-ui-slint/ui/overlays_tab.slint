@@ -6,7 +6,7 @@ import { Theme } from "theme.slint";
 import { Api } from "api.slint";
 import { SourcesApi } from "sources_api.slint";
 import { IconButton } from "scenes_rail.slint";
-import { ListView, LineEdit } from "std-widgets.slint";
+import { CheckBox, ListView, LineEdit, Slider } from "std-widgets.slint";
 
 export component OverlaysTab inherits Rectangle {
     background: transparent;
@@ -30,6 +30,77 @@ export component OverlaysTab inherits Rectangle {
             color: Theme.text-dim;
             horizontal-alignment: center;
             vertical-alignment: center;
+        }
+
+        // ---- Scene overlays: baked into every composed frame ----
+        if Api.scene-present: Text {
+            text: "SCENE OVERLAYS";
+            font-size: Theme.font-xs;
+            color: Theme.text-dim;
+            letter-spacing: 1px;
+        }
+        if Api.scene-present: CheckBox {
+            text: "Data string";
+            checked: SourcesApi.data-string-on;
+            toggled => { SourcesApi.set-data-string-overlay(self.checked); }
+        }
+        if Api.scene-present: CheckBox {
+            text: "Company logo";
+            enabled: SourcesApi.has-logo;
+            checked: SourcesApi.logo-on;
+            toggled => { SourcesApi.set-logo-enabled(self.checked); }
+        }
+        if Api.scene-present: HorizontalLayout {
+            height: 28px;
+            spacing: Theme.spacing-xs;
+
+            Rectangle {
+                width: 104px;
+                height: 24px;
+                border-radius: Theme.radius-sm;
+                background: pick-touch.has-hover ? Theme.border : Theme.card-alt;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Choose logo...";
+                    font-size: Theme.font-xs;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                pick-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { SourcesApi.choose-logo(); }
+                }
+            }
+            Text {
+                horizontal-stretch: 1;
+                height: parent.height;
+                text: SourcesApi.has-logo ? SourcesApi.logo-name : "no logo selected";
+                font-size: Theme.font-xs;
+                color: SourcesApi.has-logo ? Theme.text : Theme.text-dim;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        if Api.scene-present && SourcesApi.has-logo: HorizontalLayout {
+            height: 28px;
+            spacing: Theme.spacing-xs;
+
+            Text {
+                width: 60px;
+                text: "Size %";
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+                vertical-alignment: center;
+            }
+            Slider {
+                horizontal-stretch: 1;
+                minimum: 4;
+                maximum: 20;
+                value <=> SourcesApi.logo-size-percent;
+                changed value => { SourcesApi.set-logo-size(self.value * 0.01); }
+            }
         }
 
         if Api.scene-present: Text {

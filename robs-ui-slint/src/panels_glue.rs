@@ -30,7 +30,7 @@ use robs_core::ProfileId;
 use robs_profiles::profile::ProfileManager;
 use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::{AudioChannelView, ChatMessageView, MainWindow, PanelsApi};
+use crate::{AudioChannelView, ChatMessageView, MainWindow, PanelsApi, SourcesApi};
 
 /// Chat rows kept in the UI (the egui panel scrolls the whole backlog; the
 /// Slint list caps at the same 100-row budget as the event log).
@@ -220,6 +220,7 @@ pub fn install(
         return;
     };
     let api = root.global::<PanelsApi>();
+    let sources_api = root.global::<SourcesApi>();
 
     // ---- Audio mixer ----
     {
@@ -316,6 +317,51 @@ pub fn install(
             if let Some(root) = weak.upgrade() {
                 root.global::<PanelsApi>().set_cfg_an_output_dir(dir.into());
             }
+        });
+    }
+
+    // ---- Scene overlays: data string + logo ----
+    {
+        let controller = Rc::clone(controller);
+        sources_api.on_set_data_string_overlay(move |on: bool| {
+            let mut c = controller.borrow_mut();
+            c.overlay.data_string_enabled = on;
+            c.save_overlay_settings();
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        sources_api.on_set_logo_enabled(move |on: bool| {
+            let mut c = controller.borrow_mut();
+            c.overlay.logo_enabled = on && c.overlay.logo.is_some();
+            c.save_overlay_settings();
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        sources_api.on_choose_logo(move || {
+            // No controller borrow across the native dialog (the tick timer
+            // runs on this thread).
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "webp"])
+                .pick_file()
+            else {
+                return;
+            };
+            let path = path.to_string_lossy().into_owned();
+            let mut c = controller.borrow_mut();
+            c.set_logo_from_path(path);
+            c.overlay.logo_enabled = c.overlay.logo.is_some();
+            c.save_overlay_settings();
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        sources_api.on_set_logo_size(move |fraction: f32| {
+            let mut c = controller.borrow_mut();
+            c.overlay.logo_height_fraction = fraction.clamp(0.02, 0.5);
+            c.overlay.logo_resized = None; // re-resize at the new size
+            c.save_overlay_settings();
         });
     }
 
@@ -646,6 +692,30 @@ pub fn push(component: &MainWindow, controller: &mut RobsController, state: &mut
     let dir = controller.anomaly.settings.output_dir.clone();
     if api.get_cfg_an_output_dir().as_str() != dir.as_str() {
         api.set_cfg_an_output_dir(dir.as_str().into());
+    }
+
+    // Scene-overlay mirrors (read-only like the paths; edits flow back
+    // through the callbacks above).
+    let sources = component.global::<SourcesApi>();
+    if sources.get_data_string_on() != controller.overlay.data_string_enabled {
+        sources.set_data_string_on(controller.overlay.data_string_enabled);
+    }
+    if sources.get_logo_on() != controller.overlay.logo_enabled {
+        sources.set_logo_on(controller.overlay.logo_enabled);
+    }
+    sources.set_has_logo(controller.overlay.logo.is_some());
+    let logo_path = controller
+        .overlay
+        .logo
+        .as_ref()
+        .map(|logo| logo.path.clone())
+        .unwrap_or_default();
+    if sources.get_logo_name().as_str() != logo_path.as_str() {
+        sources.set_logo_name(logo_path.as_str().into());
+    }
+    let percent = (controller.overlay.logo_height_fraction.clamp(0.02, 0.5) * 100.0).round();
+    if (sources.get_logo_size_percent() - percent).abs() > 0.01 {
+        sources.set_logo_size_percent(percent);
     }
 }
 

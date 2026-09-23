@@ -107,10 +107,16 @@ impl RobsController {
             rgba_data.to_vec()
         };
 
-        // Bake annotations into the frame. Annotations are stored in scene
-        // output coordinates; map them onto the output-resolution frame.
+        // Bake annotations + scene overlays into the frame. Both are stored
+        // in scene output coordinates; map them onto the output-resolution
+        // frame. The blackbox/anomaly taps already took their raw copies, so
+        // only recordings/streams/snapshots carry the overlays.
         let mut scaled_data = scaled_data;
-        if !self.annotation.annotations.is_empty() || !self.text_overlays.is_empty() {
+        let has_drawables =
+            !self.annotation.annotations.is_empty() || !self.text_overlays.is_empty();
+        let has_data_string = self.overlay.data_string_enabled;
+        let has_logo = self.overlay.logo_enabled && self.overlay.logo.is_some();
+        if has_drawables || has_data_string || has_logo {
             let (scene_w, scene_h) = self
                 .scenes
                 .current_scene()
@@ -122,24 +128,59 @@ impl RobsController {
                 if self.annotation.record_font.is_none() {
                     self.annotation.record_font = crate::annotation_raster::load_system_font();
                 }
-                crate::annotation_raster::composite_annotations(
-                    &mut scaled_data,
-                    out_w,
-                    out_h,
-                    &self.annotation.annotations,
-                    scale_x,
-                    scale_y,
-                    self.annotation.record_font.as_ref(),
-                );
-                crate::annotation_raster::composite_text_overlays(
-                    &mut scaled_data,
-                    out_w,
-                    out_h,
-                    &self.text_overlays,
-                    scale_x,
-                    scale_y,
-                    self.annotation.record_font.as_ref(),
-                );
+                if has_drawables {
+                    crate::annotation_raster::composite_annotations(
+                        &mut scaled_data,
+                        out_w,
+                        out_h,
+                        &self.annotation.annotations,
+                        scale_x,
+                        scale_y,
+                        self.annotation.record_font.as_ref(),
+                    );
+                    crate::annotation_raster::composite_text_overlays(
+                        &mut scaled_data,
+                        out_w,
+                        out_h,
+                        &self.text_overlays,
+                        scale_x,
+                        scale_y,
+                        self.annotation.record_font.as_ref(),
+                    );
+                }
+                // Data-string boxes: the two telemetry groups in the bottom
+                // corners (EASTING/NORTHING/DATE/TIME left, ROV right).
+                if has_data_string {
+                    let groups = self.data_string_rows();
+                    crate::annotation_raster::composite_data_string(
+                        &mut scaled_data,
+                        out_w,
+                        out_h,
+                        &groups,
+                        scale_x,
+                        scale_y,
+                        self.annotation.record_font.as_ref(),
+                    );
+                }
+                // Company logo: resized to the configured fraction of the
+                // output height (cached per size) and placed at logo_position
+                // in scene coordinates.
+                if has_logo {
+                    if let Some((rgba, logo_w, logo_h)) = self.logo_for_output(out_h) {
+                        let x = self.overlay.logo_position.x * scale_x;
+                        let y = self.overlay.logo_position.y * scale_y;
+                        crate::annotation_raster::composite_logo(
+                            &mut scaled_data,
+                            out_w,
+                            out_h,
+                            &rgba,
+                            logo_w,
+                            logo_h,
+                            x,
+                            y,
+                        );
+                    }
+                }
             }
         }
 

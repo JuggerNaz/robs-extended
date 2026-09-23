@@ -18,6 +18,7 @@ mod blackbox;
 mod capture;
 mod clips;
 pub mod db;
+mod overlay;
 pub mod qid;
 mod record;
 mod stream;
@@ -37,7 +38,7 @@ use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
 use state::{
     AnnotationState, AnomalyState, BlackboxState, EditingState, EventLogEntry, EventLogKind,
-    PreviewState, RecordState, StreamState, TelemetryState,
+    OverlayState, PreviewState, RecordState, StreamState, TelemetryState,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -105,6 +106,8 @@ pub struct RobsController {
     pub anomaly: AnomalyState,
     // Serial data-string telemetry feed (ROV nav strings over a COM port).
     pub telemetry: TelemetryState,
+    // Scene overlays: the baked data-string boxes + the company logo.
+    pub overlay: OverlayState,
     // QID rail: structure components from the inspection DB + click-marked
     // recording time segments (see `qid.rs` / `db.rs`).
     pub qid: qid::QidState,
@@ -113,6 +116,16 @@ pub struct RobsController {
 impl RobsController {
     pub fn new() -> Self {
         let mut this = Self::build();
+        // Restore the scene-overlay settings (toggles, logo file, placement).
+        let ov = robs_profiles::settings::OverlaySettings::load_or_default();
+        this.overlay.data_string_enabled = ov.data_string_enabled;
+        this.overlay.logo_position = robs_core::Position::new(ov.logo_x, ov.logo_y);
+        this.overlay.logo_height_fraction = ov.logo_height_fraction.clamp(0.02, 0.5);
+        if !ov.logo_path.is_empty() {
+            this.set_logo_from_path(ov.logo_path);
+        }
+        // The logo toggle is only meaningful with a decodable file behind it.
+        this.overlay.logo_enabled = ov.logo_enabled && this.overlay.logo.is_some();
         // Auto-connect the telemetry feed on launch when enabled (settings
         // are persisted; the reader retries while the port is unavailable).
         if this.telemetry.settings.enabled {
@@ -303,6 +316,7 @@ impl RobsController {
             telemetry: TelemetryState::new(
                 robs_profiles::settings::SerialTelemetrySettings::load_or_default(),
             ),
+            overlay: OverlayState::default(),
             qid: {
                 let settings = robs_profiles::settings::DatabaseSettings::load_or_default();
                 let worker = settings
