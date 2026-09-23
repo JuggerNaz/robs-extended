@@ -48,12 +48,18 @@ pub mod layout {
 
 /// Handles to the models installed in `Api`, plus mirrors of the last pushed
 /// data for change detection. The two item models are owned as `ModelRc`
-/// handles (the clonable model type); when the item count changes they are
-/// rebuilt wholesale, otherwise rows are updated in place.
+/// handles (the clonable model type); when the item id sequence changes they
+/// are rebuilt wholesale, otherwise rows are updated in place.
 pub struct PushedState {
     pub scene_items: ModelRc<SceneItemView>,
     pub item_frames: ModelRc<Image>,
     items_mirror: Vec<ItemMirror>,
+    /// The item ids behind the current model rows. Both models are parallel
+    /// arrays indexed by row, so they must be rebuilt whenever the id
+    /// SEQUENCE changes — not only when the count changes. (Scene switches
+    /// between same-sized scenes reused stale rows and showed the previous
+    /// scene's textures on the new scene's items.)
+    ids_mirror: Vec<SceneItemId>,
     /// Last `PreviewFrame::version` pushed per item.
     frame_versions: HashMap<SceneItemId, u64>,
     names_mirror: Vec<String>,
@@ -132,6 +138,7 @@ impl PushedState {
             scene_items: ModelRc::new(VecModel::default()),
             item_frames: ModelRc::new(VecModel::default()),
             items_mirror: Vec::new(),
+            ids_mirror: Vec::new(),
             frame_versions: HashMap::new(),
             names_mirror: Vec::new(),
             log_len: 0,
@@ -272,9 +279,14 @@ pub fn push_state(
         });
     }
 
-    let count_changed = pushed.scene_items.row_count() != rows.len();
+    // Rebuild whenever the row identity changes — a pure count check is not
+    // enough because switching to a scene with the same item count would
+    // otherwise reuse the previous scene's rows and textures.
+    let ids: Vec<SceneItemId> = items.iter().map(|i| i.id).collect();
+    let count_changed = pushed.scene_items.row_count() != rows.len() || pushed.ids_mirror != ids;
     if count_changed {
         // Item sets change rarely: rebuild both models wholesale.
+        pushed.ids_mirror = ids;
         pushed.frame_versions.clear();
         let mut frames = Vec::with_capacity(rows.len());
         for item in &items {
@@ -299,13 +311,16 @@ pub fn push_state(
                 pushed.scene_items.set_row_data(i, rows[i].clone());
             }
 
-            // Upload a frame only when its version changed.
+            // Upload a frame only when its version changed. A frame that
+            // DISAPPEARED must clear the row's image: leaving the old texture
+            // in place showed the previous scene's picture under the new item.
             let frame = controller.preview.preview_frames.get(&item.id);
             let changed =
                 match (frame.map(|f| f.version), pushed.frame_versions.get(&item.id)) {
                     (Some(v), Some(last)) => v != *last,
                     (Some(_), None) => true,
-                    (None, _) => false,
+                    (None, Some(_)) => true,
+                    (None, None) => false,
                 };
             if changed {
                 match frame {

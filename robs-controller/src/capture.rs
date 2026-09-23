@@ -218,23 +218,47 @@ impl RobsController {
         }
         self.preview.last_preview_capture = std::time::Instant::now();
 
-        // Collect all visible capture source items first to avoid borrow issues.
-        // Each item carries its typed `CaptureSource` metadata; the name string is
-        // now just a display label and carries no machine-parsed parameters.
-        let scene = self.scenes.current_scene();
-        let capture_items: Vec<_> = scene
-            .map(|s| {
-                s.items()
-                    .iter()
-                    .filter(|i| i.is_visible() && i.capture().is_some())
-                    .map(|i| (i.id(), i.capture().cloned()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // PER-SCENE SOURCE OWNERSHIP: every scene's visible capture items are
+        // polled each tick, not just the current scene's. Switching scenes
+        // must never starve or destroy another scene's sources (a webcam in a
+        // background scene keeps its FFmpeg reader warm; a monitor item keeps
+        // its DXGI capturer initialized). The current scene's items go first
+        // so the encoder pacer below is deterministically fed by the scene
+        // being recorded.
+        let current_name = self.scenes.current_scene_name().map(str::to_string);
+        let mut scene_names: Vec<String> = self.scenes.scenes().keys().cloned().collect();
+        scene_names.sort();
+        let mut capture_items: Vec<(SceneItemId, CaptureSource, bool)> = Vec::new();
+        if let Some(name) = &current_name {
+            if let Some(scene) = self.scenes.get(name) {
+                for item in scene.items() {
+                    if item.is_visible() {
+                        if let Some(capture) = item.capture() {
+                            capture_items.push((item.id(), capture.clone(), true));
+                        }
+                    }
+                }
+            }
+        }
+        for name in &scene_names {
+            if Some(name.as_str()) == current_name.as_deref() {
+                continue;
+            }
+            let Some(scene) = self.scenes.get(name) else {
+                continue;
+            };
+            for item in scene.items() {
+                if item.is_visible() {
+                    if let Some(capture) = item.capture() {
+                        capture_items.push((item.id(), capture.clone(), false));
+                    }
+                }
+            }
+        }
 
         if capture_items.is_empty() {
-            // No capture sources - stop preview. A live encoder still gets
-            // duplicated frames so its output keeps real-time pace.
+            // No capture sources in ANY scene - stop preview. A live encoder
+            // still gets duplicated frames so its output keeps real-time pace.
             if self.preview.preview_capture_active {
                 self.preview.preview_capture_active = false;
                 eprintln!("[Preview] No capture sources, stopping preview");
@@ -246,14 +270,16 @@ impl RobsController {
         self.preview.preview_capture_active = true;
         self.preview.preview_frame_count += 1;
 
-        // Capture each source independently. The capture kind + parameters are
-        // now typed, so we resolve a single frame per item from its `CaptureSource`
-        // and share the texture / recording / snapshot handling below.
-        for (item_id, capture) in &capture_items {
+        // Capture each source independently from its typed `CaptureSource`
+        // metadata. The CURRENT scene's frames feed the encoders and the
+        // blackbox/anomaly taps; background scenes only refresh their preview
+        // textures so their canvas is live the moment they are selected.
+        // One DXGI grab per monitor per tick, shared by every item displaying
+        // that monitor (an earlier bug re-captured the same output per item).
+        let mut display_cache: std::collections::HashMap<(i32, i32), Option<(Vec<u8>, u32, u32)>> =
+            std::collections::HashMap::new();
+        for (item_id, capture, is_current) in &capture_items {
             let texture_key = *item_id;
-            let Some(capture) = capture else {
-                continue;
-            };
 
             // Resolve a fresh frame for this source based on its typed metadata.
             // DXGI / GDI / webcam all return BGRA, so the shared body converts once.
@@ -270,15 +296,19 @@ impl RobsController {
                     width,
                     height,
                     label,
-                } => {
-                    let position = (*x, *y);
-                    eprintln!(
-                        "[Preview] Capturing Display Capture '{}' at position ({}, {}) - {}x{}",
-                        label, x, y, width, height
-                    );
-                    // Pure DX11 capture - no GDI fallback
-                    self.capture_desktop_frame(position)
-                }
+                } => match display_cache.entry((*x, *y)) {
+                    std::collections::hash_map::Entry::Occupied(grabbed) => grabbed.get().clone(),
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        eprintln!(
+                            "[Preview] Capturing Display Capture '{}' at position ({}, {}) - {}x{}",
+                            label, x, y, width, height
+                        );
+                        // Pure DX11 capture - no GDI fallback
+                        let grabbed = self.capture_desktop_frame((*x, *y));
+                        slot.insert(grabbed.clone());
+                        grabbed
+                    }
+                },
                 CaptureSource::Webcam { .. } => {
                     // Webcam capture via FFmpeg dshow background process
                     self.webcam_captures
@@ -288,14 +318,16 @@ impl RobsController {
             };
 
             if let Some((data, width, height)) = frame {
-                // Blackbox tap: feed the raw BGRA frame to the always-on safety
-                // recorder BEFORE the preview path swaps it to RGBA (ffmpeg
-                // consumes BGRA natively). Non-blocking; no-op without an engine.
-                self.submit_blackbox_frame(&data, width, height);
-                // Anomaly tap: same raw BGRA frame, fed to the (user-toggled)
-                // rolling buffer for on-demand clip capture. Non-blocking; no-op
-                // without a running engine.
-                self.submit_anomaly_frame(&data, width, height);
+                if *is_current {
+                    // Blackbox tap: feed the raw BGRA frame to the always-on safety
+                    // recorder BEFORE the preview path swaps it to RGBA (ffmpeg
+                    // consumes BGRA natively). Non-blocking; no-op without an engine.
+                    self.submit_blackbox_frame(&data, width, height);
+                    // Anomaly tap: same raw BGRA frame, fed to the (user-toggled)
+                    // rolling buffer for on-demand clip capture. Non-blocking; no-op
+                    // without a running engine.
+                    self.submit_anomaly_frame(&data, width, height);
+                }
 
                 // Convert BGRA -> RGBA (DXGI / GDI / webcam all return BGRA).
                 let mut rgba_data = data;
@@ -322,13 +354,14 @@ impl RobsController {
                 // capture - both encoders tap into the same frame preview
                 // uses). Compose once, then hand a copy to each active
                 // encoder so running both at once does not double the
-                // scale/annotation work per tick.
+                // scale/annotation work per tick. Gated to the current scene:
+                // background scenes refresh textures only.
                 let recording_active = self.record.recording
                     && !self.record.recording_paused
                     && self.record.recording_frame_sender.is_some();
                 let streaming_active =
                     self.streaming && !self.streaming_paused && self.stream.frame_sender.is_some();
-                if recording_active || streaming_active {
+                if *is_current && (recording_active || streaming_active) {
                     if let Some(bgra) = self.compose_output_frame(&rgba_data, width, height) {
                         if recording_active {
                             if let Some(tx) = &self.record.recording_frame_sender {
@@ -369,14 +402,23 @@ impl RobsController {
             }
         }
 
-        // Clean up frames, hwnd mappings, and webcam captures for sources that no longer exist
-        let active_ids: std::collections::HashSet<SceneItemId> =
-            capture_items.iter().map(|(id, _)| *id).collect();
+        // Tear down frames, hwnd mappings, and webcam captures only for items
+        // that no longer exist in ANY scene. (This used to retain only the
+        // CURRENT scene's items, which destroyed other scenes' webcam
+        // FFmpeg processes and window hwnds on every scene switch — the
+        // "webcam stops after adding a source to another scene" bug.)
+        let mut live_ids: std::collections::HashSet<SceneItemId> =
+            std::collections::HashSet::new();
+        for scene in self.scenes.scenes().values() {
+            for item in scene.items() {
+                live_ids.insert(item.id());
+            }
+        }
         self.preview
             .preview_frames
-            .retain(|id, _| active_ids.contains(id));
-        self.window_hwnds.retain(|id, _| active_ids.contains(id));
-        self.webcam_captures.retain(|id, _| active_ids.contains(id));
+            .retain(|id, _| live_ids.contains(id));
+        self.window_hwnds.retain(|id, _| live_ids.contains(id));
+        self.webcam_captures.retain(|id, _| live_ids.contains(id));
 
         // Frame duplication: when this tick composed no fresh frame (e.g.
         // DXGI timed out on an unchanged screen), repeat the last one so the

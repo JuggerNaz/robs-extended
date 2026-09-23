@@ -96,6 +96,38 @@ fn parse_u32_or(s: SharedString, fallback: u32) -> u32 {
     s.trim().parse().unwrap_or(fallback)
 }
 
+/// Fit a newly added source to the scene canvas (OBS "Fit to screen"):
+/// scale to CONTAIN the whole source inside the scene output resolution and
+/// center the letterboxed result. Without this a source is added at its
+/// native pixel size from (0,0) — an ultrawide monitor capture then sticks
+/// far outside the 1920x1080 canvas and a 1280x720 webcam sits small in the
+/// corner. Sources with unknown native size (window capture) keep the
+/// canvas-filling scale-1 default.
+fn fit_item_to_scene(scene: &mut robs_core::scene::Scene, item_id: SceneItemId) {
+    let (scene_w, scene_h) = scene.output_size();
+    if scene_w == 0 || scene_h == 0 {
+        return;
+    }
+    let Some((src_w, src_h)) = scene
+        .item(item_id)
+        .and_then(|i| i.capture())
+        .and_then(|c| c.native_size())
+    else {
+        return;
+    };
+    let (src_w, src_h) = (src_w as f32, src_h as f32);
+    if src_w <= 0.0 || src_h <= 0.0 {
+        return;
+    }
+    let scale = (scene_w as f32 / src_w).min(scene_h as f32 / src_h);
+    let x = (scene_w as f32 - src_w * scale) / 2.0;
+    let y = (scene_h as f32 - src_h * scale) / 2.0;
+    if let Some(item) = scene.item_mut(item_id) {
+        item.set_position(Position { x, y });
+        item.set_scale(Scale { x: scale, y: scale });
+    }
+}
+
 /// Wire every `SourcesApi` callback. Device pickers' static models are
 /// installed here; the (refreshable) window list and the scene-derived models
 /// are maintained by [`push`].
@@ -192,13 +224,14 @@ pub fn install(
                     if let Some(item) = scene.item_mut(item_id) {
                         item.set_capture(Some(capture));
                     }
+                    fit_item_to_scene(scene, item_id);
                 }
             });
         }
     }
     {
-        let controller = Rc::clone(controller);
-        let state = Rc::clone(state);
+        let controller = Rc::clone(&controller);
+        let state = Rc::clone(&state);
         if let Some(root) = component.upgrade() {
             let api = root.global::<SourcesApi>();
             api.on_add_window_source(move |index: i32| {
@@ -218,6 +251,7 @@ pub fn install(
                     if let Some(item) = scene.item_mut(item_id) {
                         item.set_capture(Some(capture));
                     }
+                    fit_item_to_scene(scene, item_id);
                     c.window_hwnds.insert(item_id, window.hwnd);
                 }
             });
@@ -241,6 +275,7 @@ pub fn install(
                     if let Some(item) = scene.item_mut(item_id) {
                         item.set_capture(Some(capture));
                     }
+                    fit_item_to_scene(scene, item_id);
                     c.log_event(format!("Video source added: {cam}"), EventLogKind::Info);
                     match WebcamCapture::new(&cam, 1280, 720, 30.0) {
                         Some(wc) => {
@@ -535,5 +570,96 @@ pub fn push(component: &MainWindow, controller: &mut RobsController, state: &mut
             })
             .collect();
         api.set_overlays(ModelRc::new(VecModel::from(view)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_item_to_scene;
+    use robs_core::scene::{CaptureSource, Scene};
+    use robs_core::types::{ObjectId, SceneItemId, SourceId};
+
+    /// Add a capture source to a fresh default (1920x1080) scene and return
+    /// its (position, scale) after the fit pass — the exact code path the
+    /// add-source buttons run.
+    fn fitted(capture: CaptureSource) -> ((f32, f32), (f32, f32)) {
+        let mut scene = Scene::new("Test".to_string());
+        let id: SceneItemId = scene.add_source(SourceId(ObjectId::new()), "src".to_string());
+        scene.item_mut(id).unwrap().set_capture(Some(capture));
+        fit_item_to_scene(&mut scene, id);
+        let item = scene.item(id).unwrap();
+        let pos = item.position();
+        let scale = item.scale();
+        ((pos.x, pos.y), (scale.x, scale.y))
+    }
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn webcam_720p_fills_the_1080p_canvas() {
+        let (pos, scale) = fitted(CaptureSource::Webcam {
+            device: "cam".to_string(),
+            width: 1280,
+            height: 720,
+        });
+        // 16:9 source in a 16:9 canvas: exact fit, no letterbox.
+        assert!(approx(scale.0, 1.5) && approx(scale.1, 1.5), "scale {scale:?}");
+        assert!(approx(pos.0, 0.0) && approx(pos.1, 0.0), "pos {pos:?}");
+    }
+
+    #[test]
+    fn ultrawide_display_is_letterboxed_and_centered() {
+        let (pos, scale) = fitted(CaptureSource::Display {
+            x: 0,
+            y: 0,
+            width: 3440,
+            height: 1440,
+            label: "Primary".to_string(),
+        });
+        // min(1920/3440, 1080/1440) = 0.5581: width fills the canvas,
+        // the height is centered (black bars top/bottom).
+        assert!(approx(scale.0, 1920.0 / 3440.0) && approx(scale.1, 1920.0 / 3440.0));
+        assert!(approx(pos.0, 0.0));
+        assert!(approx(pos.1, (1080.0 - 1440.0 * (1920.0 / 3440.0)) / 2.0));
+    }
+
+    #[test]
+    fn portrait_source_centers_horizontally() {
+        let (pos, scale) = fitted(CaptureSource::Display {
+            x: 0,
+            y: 0,
+            width: 1080,
+            height: 1920,
+            label: "Portrait".to_string(),
+        });
+        // min(1.777, 0.5625) = 0.5625: height fills the canvas,
+        // the width is centered (black bars left/right).
+        assert!(approx(scale.0, 0.5625) && approx(scale.1, 0.5625));
+        assert!(approx(pos.0, (1920.0 - 1080.0 * 0.5625) / 2.0));
+        assert!(approx(pos.1, 0.0));
+    }
+
+    #[test]
+    fn window_capture_without_native_size_keeps_scale_one() {
+        let (pos, scale) = fitted(CaptureSource::Window {
+            title: "w".to_string(),
+        });
+        // Native size resolves at runtime; scale 1 fills the canvas by
+        // convention (push.rs falls back to the scene size for such items).
+        assert!(approx(scale.0, 1.0) && approx(scale.1, 1.0));
+        assert!(approx(pos.0, 0.0) && approx(pos.1, 0.0));
+    }
+
+    #[test]
+    fn degenerate_source_size_is_ignored() {
+        let (pos, scale) = fitted(CaptureSource::Webcam {
+            device: "cam".to_string(),
+            width: 0,
+            height: 0,
+        });
+        assert!(approx(scale.0, 1.0) && approx(scale.1, 1.0));
+        assert!(approx(pos.0, 0.0) && approx(pos.1, 0.0));
     }
 }
