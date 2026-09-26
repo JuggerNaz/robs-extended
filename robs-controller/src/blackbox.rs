@@ -75,7 +75,12 @@ impl RobsController {
     /// `Movies` folder when no recording path is set), matching the main
     /// recorder's convention.
     fn build_blackbox_config(&self) -> BlackboxConfig {
-        let output_dir = if self.blackbox.settings.output_dir.is_empty() {
+        // A recording in progress redirects output into its session folder
+        // (`<session>/Blackbox`, set in `record.rs`); otherwise the
+        // settings/default resolution applies.
+        let output_dir = if let Some(session_dir) = self.blackbox.session_override.as_ref() {
+            session_dir.clone()
+        } else if self.blackbox.settings.output_dir.is_empty() {
             let base = if self.recording_path.is_empty() {
                 super::default_videos_dir()
             } else {

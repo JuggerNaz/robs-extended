@@ -59,7 +59,12 @@ impl RobsController {
     /// of the recording path (or the home `Videos`/`Movies` folder when none
     /// is set).
     fn build_anomaly_config(&self) -> AnomalyConfig {
-        let output_dir = if self.anomaly.settings.output_dir.is_empty() {
+        // A recording in progress redirects clips into its session folder
+        // (`<session>/Anomaly`, set in `record.rs`); otherwise the
+        // settings/default resolution applies.
+        let output_dir = if let Some(session_dir) = self.anomaly.session_override.as_ref() {
+            session_dir.clone()
+        } else if self.anomaly.settings.output_dir.is_empty() {
             let base = if self.recording_path.is_empty() {
                 super::default_videos_dir()
             } else {

@@ -5,7 +5,6 @@ use super::state::EventLogKind;
 use super::RobsController;
 use robs_core::scene::CaptureSource;
 use std::fs;
-use std::path::PathBuf;
 use std::process::Stdio;
 
 /// GOP size in frames: fps × keyframe interval, minimum 1. Shared by the
@@ -15,6 +14,29 @@ use std::process::Stdio;
 /// 30fps), leaving clip starts landing far before their marks.
 pub(crate) fn gop_size(fps: f32, keyframe_interval: u32) -> u32 {
     ((fps * keyframe_interval as f32) as u32).max(1)
+}
+
+/// Date-folder name for a recording session: `DD_MM_YYYY` of the recording's
+/// START date, e.g. `23_09_2026`.
+pub(crate) fn date_folder_name(now: chrono::DateTime<chrono::Local>) -> String {
+    now.format("%d_%m_%Y").to_string()
+}
+
+/// Session folder for a new recording: the first free `recording_N` under
+/// `<base>/<date_folder>/` — the smallest N >= 1 whose folder does not exist
+/// yet (gaps are filled: with recording_1 and recording_3 present,
+/// recording_2 is picked). `exists` is injected so unit tests can run
+/// against an in-memory set.
+pub(crate) fn pick_session_dir(
+    base: &std::path::Path,
+    date_folder: &str,
+    mut exists: impl FnMut(&std::path::Path) -> bool,
+) -> std::path::PathBuf {
+    let date_dir = base.join(date_folder);
+    (1u32..)
+        .map(|index| date_dir.join(format!("recording_{index}")))
+        .find(|candidate| !exists(candidate))
+        .expect("a free recording_N index always exists in practice")
 }
 
 impl RobsController {
@@ -51,16 +73,62 @@ impl RobsController {
             self.recording_path.clone()
         };
 
-        let timestamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
-        let filename = format!("ROBS_{}.{}", timestamp, self.recording_format);
-        let full_path = PathBuf::from(&path).join(&filename);
+        // Session folder: `<base>/<DD_MM_YYYY>/recording_N` of the START
+        // date (a recording crossing midnight stays under its start date).
+        // Everything produced while this recording runs lands inside it —
+        // clips, snapshots, and the QID sidecar follow
+        // `last_recording_path`'s parent automatically; blackbox and anomaly
+        // are redirected via their session overrides below.
+        let now = chrono::Local::now();
+        let session = pick_session_dir(
+            std::path::Path::new(&path),
+            &date_folder_name(now),
+            |candidate| candidate.exists(),
+        );
+        fs::create_dir_all(&session).ok();
 
-        // Create parent directory if needed
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).ok();
-        }
+        let timestamp = now.format("%Y-%m-%d %H-%M-%S");
+        let filename = format!("ROBS_{}.{}", timestamp, self.recording_format);
+        let full_path = session.join(&filename);
 
         self.record.last_recording_path = full_path.to_string_lossy().into_owned();
+        self.record.session_dir = Some(session.clone());
+
+        // Redirect the always-on blackbox into the session folder: stopping
+        // it now lets the per-tick `sync_blackbox_engine` restart it within
+        // one tick with the new output dir — the current segment closes
+        // cleanly and the next one lands in `<session>/Blackbox`.
+        let blackbox_dir = session.join("Blackbox");
+        fs::create_dir_all(&blackbox_dir).ok();
+        self.blackbox.session_override = Some(blackbox_dir);
+        if self
+            .blackbox
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.is_running())
+        {
+            self.stop_blackbox();
+        }
+
+        // Same redirection for the user-toggled anomaly buffer, which has no
+        // tick sync — restart it here. Trade-off: this drops the rolling
+        // pre-roll history (it refills within the pre-roll window).
+        let anomaly_dir = session.join("Anomaly");
+        fs::create_dir_all(&anomaly_dir).ok();
+        self.anomaly.session_override = Some(anomaly_dir);
+        if self
+            .anomaly
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.is_running())
+        {
+            self.stop_anomaly();
+            self.start_anomaly();
+            self.log_event(
+                "Anomaly buffer moved into this recording's session folder (pre-roll buffer restarted)",
+                EventLogKind::Info,
+            );
+        }
 
         // Find the active capture source from current scene
         eprintln!("[Recording] Looking for capture source...");
@@ -596,12 +664,42 @@ impl RobsController {
             format!("Recording stopped ({})", duration_str),
             EventLogKind::Record,
         );
+
+        // The session ends here: clear the output overrides so each engine
+        // resumes in its normal location — blackbox via the next tick's sync,
+        // the anomaly buffer via an explicit restart (only when it is
+        // actually running; a buffer the user stopped stays stopped).
+        if self.blackbox.session_override.take().is_some()
+            && self
+                .blackbox
+                .engine
+                .as_ref()
+                .is_some_and(|engine| engine.is_running())
+        {
+            self.stop_blackbox();
+        }
+        if self.anomaly.session_override.take().is_some()
+            && self
+                .anomaly
+                .engine
+                .as_ref()
+                .is_some_and(|engine| engine.is_running())
+        {
+            self.stop_anomaly();
+            self.start_anomaly();
+            self.log_event(
+                "Anomaly buffer restored to its normal location (pre-roll buffer restarted)",
+                EventLogKind::Info,
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::gop_size;
+    use super::{date_folder_name, gop_size, pick_session_dir};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
 
     #[test]
     fn gop_size_matches_fps_times_interval() {
@@ -614,5 +712,50 @@ mod tests {
     fn gop_size_clamps_to_one() {
         assert_eq!(gop_size(30.0, 0), 1);
         assert_eq!(gop_size(0.0, 2), 1);
+    }
+
+    #[test]
+    fn date_folder_uses_start_date_dd_mm_yyyy() {
+        use chrono::TimeZone;
+        let start = chrono::Local
+            .with_ymd_and_hms(2026, 9, 23, 23, 59, 1)
+            .unwrap();
+        assert_eq!(date_folder_name(start), "23_09_2026");
+    }
+
+    #[test]
+    fn picks_first_free_session_index() {
+        let base = std::path::Path::new("base");
+        let empty: HashSet<PathBuf> = HashSet::new();
+        assert_eq!(
+            pick_session_dir(base, "23_09_2026", |p| empty.contains(p)),
+            PathBuf::from("base")
+                .join("23_09_2026")
+                .join("recording_1")
+        );
+    }
+
+    #[test]
+    fn session_index_fills_the_first_gap() {
+        let base = std::path::Path::new("base");
+        let date = "23_09_2026";
+        let taken = |indices: &[u32]| -> HashSet<PathBuf> {
+            indices
+                .iter()
+                .map(|i| base.join(date).join(format!("recording_{i}")))
+                .collect()
+        };
+        // recording_1..3 all exist -> recording_4.
+        let one_to_three = taken(&[1, 2, 3]);
+        assert_eq!(
+            pick_session_dir(base, date, |p| one_to_three.contains(p)),
+            base.join(date).join("recording_4")
+        );
+        // A gap (recording_2 missing) is filled rather than skipped.
+        let one_and_three = taken(&[1, 3]);
+        assert_eq!(
+            pick_session_dir(base, date, |p| one_and_three.contains(p)),
+            base.join(date).join("recording_2")
+        );
     }
 }

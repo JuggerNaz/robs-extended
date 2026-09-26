@@ -65,6 +65,10 @@ pub struct RecordState {
     pub recording_time: u64,
     pub recording_start_time: Option<u64>,
     pub last_recording_path: String,
+    /// Session folder of the current/last recording:
+    /// `<base>/<DD_MM_YYYY>/recording_N`. Set at recording start and kept
+    /// after stop for reference (replaced on the next start).
+    pub session_dir: Option<std::path::PathBuf>,
     pub recording_file_output: Option<robs_outputs::FileOutput>,
     pub ffmpeg_recording_handle: Option<std::process::Child>,
     pub recording_dxgi_thread: Option<std::thread::JoinHandle<()>>,
@@ -181,6 +185,10 @@ pub struct BlackboxState {
     /// Event channel the engine publishes on.
     pub event_tx: robs_core::event::EventTx,
     pub event_rx: Option<robs_core::event::EventRx>,
+    /// When `Some`, the engine's output goes into the active recording's
+    /// session folder (`<session>/Blackbox`) instead of the settings/default
+    /// location. Set for the lifetime of a recording, cleared on stop.
+    pub session_override: Option<std::path::PathBuf>,
 }
 
 /// Short Clip Anomaly Capture engine state.
@@ -195,6 +203,10 @@ pub struct AnomalyState {
     pub status: robs_core::event::AnomalyStatus,
     pub event_tx: robs_core::event::EventTx,
     pub event_rx: Option<robs_core::event::EventRx>,
+    /// When `Some`, exported clips land in the active recording's session
+    /// folder (`<session>/Anomaly`) instead of the settings/default location.
+    /// Set for the lifetime of a recording, cleared on stop.
+    pub session_override: Option<std::path::PathBuf>,
 }
 
 /// Serial data-string telemetry feed state (ROV nav strings over a COM port).

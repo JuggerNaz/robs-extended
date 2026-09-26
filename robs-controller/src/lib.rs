@@ -216,6 +216,7 @@ impl RobsController {
                 recording_time: 0,
                 recording_start_time: None,
                 last_recording_path: String::new(),
+                session_dir: None,
                 recording_file_output: None,
                 ffmpeg_recording_handle: None,
                 recording_dxgi_thread: None,
@@ -298,6 +299,7 @@ impl RobsController {
                     status: robs_core::event::BlackboxStatus::default(),
                     event_tx: bus.tx(),
                     event_rx: Some(rx),
+                    session_override: None,
                 }
             },
             anomaly: {
@@ -311,6 +313,7 @@ impl RobsController {
                     status: robs_core::event::AnomalyStatus::default(),
                     event_tx: bus.tx(),
                     event_rx: Some(rx),
+                    session_override: None,
                 }
             },
             telemetry: TelemetryState::new(
