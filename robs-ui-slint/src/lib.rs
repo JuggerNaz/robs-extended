@@ -195,7 +195,7 @@ pub fn run(controller: RobsController) -> Result<(), slint::PlatformError> {
     sources_glue::push(&component, &mut controller.borrow_mut(), &mut sources.borrow_mut());
     panels_glue::push(&component, &mut controller.borrow_mut(), &mut panels.borrow_mut());
     telemetry_glue::push(&component, &controller.borrow());
-    qid_glue::push(&component, &controller.borrow(), &qid_ui.borrow());
+    qid_glue::push(&component, &controller.borrow(), &mut qid_ui.borrow_mut());
 
     // ---- Tick timer: SingleShot, re-armed with the engine's wake hint ----
     // A `slint::Timer` cannot be re-armed with a NEW interval from inside its
@@ -253,7 +253,7 @@ fn arm_tick(
             sources_glue::push(&component, &mut controller.borrow_mut(), &mut sources.borrow_mut());
             panels_glue::push(&component, &mut controller.borrow_mut(), &mut panels.borrow_mut());
             telemetry_glue::push(&component, &controller.borrow());
-            qid_glue::push(&component, &controller.borrow(), &qid.borrow());
+            qid_glue::push(&component, &controller.borrow(), &mut qid.borrow_mut());
         }
         arm_tick(
             &next,

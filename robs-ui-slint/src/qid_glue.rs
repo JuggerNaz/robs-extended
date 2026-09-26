@@ -11,7 +11,7 @@ use chrono::Local;
 use robs_controller::qid::{qid_matches, QidComponent};
 use robs_controller::state::EventLogKind;
 use robs_controller::RobsController;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::{MainWindow, QidApi, QidRowView};
 
@@ -19,15 +19,36 @@ use crate::{MainWindow, QidApi, QidRowView};
 const EMPTY: &str = "—";
 
 /// UI-side state for the QID rail: the live search filter (lowercased;
-/// matches `q_id`, `id_no`, and `code` — see `qid::qid_matches`).
+/// matches `q_id`, `id_no`, and `code` — see `qid::qid_matches`) plus the
+/// persistent rows model.
 pub struct QidUi {
     filter: String,
+    /// The rows model installed as `QidApi.rows`, updated IN PLACE per tick.
+    /// Installing a fresh `ModelRc` every push would reset the ListView and
+    /// recreate every row delegate — and their TouchAreas — at tick rate
+    /// (~30x/s while recording), swallowing clicks: the press lands on a
+    /// delegate that no longer exists at release, so `clicked` never fires.
+    /// Same idiom as `push::PushedState`'s in-place models: rows are updated
+    /// per-index and the model is only rebuilt wholesale when the row id
+    /// SEQUENCE changes (search filter edit, DB reload).
+    rows: Rc<VecModel<QidRowView>>,
+    /// Owned copy of the rows currently in `rows`, for change detection.
+    rows_mirror: Vec<QidRowView>,
 }
 
 impl QidUi {
     pub fn new() -> Self {
-        Self { filter: String::new() }
+        Self {
+            filter: String::new(),
+            rows: Rc::new(VecModel::from(Vec::new())),
+            rows_mirror: Vec::new(),
+        }
     }
+}
+
+/// True when a pushed row's visible fields differ from its mirrored copy.
+fn row_differs(a: &QidRowView, b: &QidRowView) -> bool {
+    a.id != b.id || a.current != b.current || a.q_id != b.q_id || a.sub != b.sub
 }
 
 /// Sub-label under the QID: `id_no`, falling back to `code`.
@@ -108,7 +129,7 @@ pub fn install(
 
 /// Push the snapshot into the rail: filtered rows, header count, CURRENT QID
 /// panel, and the DB status chip.
-pub fn push(component: &MainWindow, controller: &RobsController, qid_ui: &QidUi) {
+pub fn push(component: &MainWindow, controller: &RobsController, qid_ui: &mut QidUi) {
     let api = component.global::<QidApi>();
     let qid = &controller.qid;
 
@@ -123,7 +144,26 @@ pub fn push(component: &MainWindow, controller: &RobsController, qid_ui: &QidUi)
             current: qid.current.as_ref().map(|cur| cur.id) == Some(c.id),
         })
         .collect();
-    api.set_rows(ModelRc::new(VecModel::from(rows)));
+    if qid_ui.rows_mirror.len() != rows.len()
+        || qid_ui
+            .rows_mirror
+            .iter()
+            .zip(rows.iter())
+            .any(|(m, r)| m.id != r.id)
+    {
+        // Row set/identity changed (filter edit, DB reload): wholesale swap.
+        qid_ui.rows.set_vec(rows.clone());
+    } else {
+        // Same rows: update only the changed indices in place so the
+        // delegates (and their TouchAreas) survive the tick (see `QidUi::rows`).
+        for (i, row) in rows.iter().enumerate() {
+            if row_differs(&qid_ui.rows_mirror[i], row) {
+                qid_ui.rows.set_row_data(i, row.clone());
+            }
+        }
+    }
+    qid_ui.rows_mirror = rows;
+    api.set_rows(ModelRc::from(qid_ui.rows.clone()));
     // Header count shows the TOTAL loaded rows, not the filtered view.
     api.set_total(qid.components.len() as i32);
 
