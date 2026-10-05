@@ -131,6 +131,8 @@ cargo run
 
 The Slint front-end is the only UI; `--ui <frontend>` is still accepted for launcher compatibility but ignored.
 
+Pass `--demo-chat` to inject mock chat messages (fake Twitch/YouTube traffic for styling the chat panel); the mock generator is off by default.
+
 ## Current Status
 
 This is a functional project with a working UI, capture, encoding, streaming, and recording pipeline on Windows. The following major components are implemented:
