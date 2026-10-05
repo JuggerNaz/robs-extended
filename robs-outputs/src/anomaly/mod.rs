@@ -47,7 +47,8 @@ use parking_lot::RwLock;
 
 use robs_core::event::{AnomalyEvent, AnomalyStatus, EventTx, RobsEvent};
 
-use crate::shared::{now_ms, sleep_with_stop, FrameInput};
+use crate::shared::pump::{frame_pump, FramePumpPolicy};
+use crate::shared::{now_ms, FrameInput};
 
 use segment::ScratchSegment as Seg;
 
@@ -298,227 +299,231 @@ fn spawn_worker(
     std::thread::Builder::new()
         .name("anomaly-worker".into())
         .spawn(move || {
-            worker_loop(&config, &status, &rx, &cmd_rx, &stop_flag, &export_active, &events);
+            // Keep a little more than the pre-roll window so pin_pre_roll can
+            // always find enough (the byte cap is enforced independently by
+            // sweep).
+            let keep_secs = config
+                .pre_roll_secs
+                .saturating_add(config.segment_duration_secs.saturating_mul(2));
+            let max_buffer_bytes = config.max_buffer_bytes;
+            let policy = AnomalyWorkerPolicy {
+                buffer_dir: config.output_dir.join("buffer"),
+                config,
+                status,
+                cmd_rx,
+                export_active,
+                events,
+                keep_secs,
+                segment_index: 0,
+                ring: Ring::new(max_buffer_bytes),
+                active_export: None,
+            };
+            frame_pump(policy, &rx, &stop_flag);
         })
         .expect("spawn anomaly-worker")
 }
 
-#[allow(clippy::too_many_arguments)]
-fn worker_loop(
-    config: &AnomalyConfig,
-    status: &Arc<RwLock<AnomalyStatus>>,
-    rx: &Receiver<FrameInput>,
-    cmd_rx: &Receiver<EngineCmd>,
-    stop_flag: &AtomicBool,
-    export_active: &AtomicBool,
-    events: &EventTx,
-) {
-    let buffer_dir = config.output_dir.join("buffer");
-    // Keep a little more than the pre-roll window so pin_pre_roll can always
-    // find enough (the byte cap is enforced independently by sweep).
-    let keep_secs = config
-        .pre_roll_secs
-        .saturating_add(config.segment_duration_secs.saturating_mul(2));
+/// The anomaly [`FramePumpPolicy`]: user-toggled buffering with disposable
+/// scratch segments in a rolling ring, a `save` command channel drained before
+/// each frame receive, and an export-deadline check after each tick.
+struct AnomalyWorkerPolicy {
+    buffer_dir: PathBuf,
+    config: Arc<AnomalyConfig>,
+    status: Arc<RwLock<AnomalyStatus>>,
+    cmd_rx: Receiver<EngineCmd>,
+    export_active: Arc<AtomicBool>,
+    events: EventTx,
+    keep_secs: u64,
+    segment_index: u64,
+    ring: Ring,
+    active_export: Option<ActiveExport>,
+}
 
-    let mut segment_index: u64 = 0;
-    let mut active: Option<Seg> = None;
-    let mut ring = Ring::new(config.max_buffer_bytes);
-    let mut active_export: Option<ActiveExport> = None;
+impl AnomalyWorkerPolicy {
+    fn send_ev(&self, ev: AnomalyEvent) {
+        let _ = self.events.send(RobsEvent::Anomaly(ev));
+    }
 
-    let send_ev = |ev: AnomalyEvent| {
-        let _ = events.send(RobsEvent::Anomaly(ev));
-    };
-    let set_last_error = |msg: String| {
-        status.write().last_error = Some(msg);
-    };
+    fn set_last_error(&self, msg: String) {
+        self.status.write().last_error = Some(msg);
+    }
+}
 
-    loop {
-        if stop_flag.load(Ordering::SeqCst) {
-            break;
+impl FramePumpPolicy for AnomalyWorkerPolicy {
+    type Seg = Seg;
+
+    fn recv_timeout(&self, _has_active: bool) -> Duration {
+        // Short timeout keeps commands/deadlines live.
+        Duration::from_millis(150)
+    }
+
+    fn should_rotate(&self, active: Option<&Seg>, frame: &FrameInput) -> bool {
+        match active {
+            None => true,
+            Some(seg) => {
+                !seg.dims_match(frame.width, frame.height)
+                    || seg.elapsed().as_secs() >= self.config.segment_duration_secs
+            }
         }
+    }
 
+    fn open_segment(&mut self, frame: &FrameInput, _replacing: bool) -> anyhow::Result<Seg> {
+        let path = self.buffer_dir.join(format!("seg_{:06}.mkv", self.segment_index));
+        let seg = Seg::open(&self.config, self.segment_index, frame.width, frame.height, path);
+        self.segment_index = self.segment_index.wrapping_add(1);
+        seg
+    }
+
+    fn on_segment_opened(&mut self, _seg: &Seg) {}
+
+    fn on_open_write_error(&mut self, _seg: Seg, err: anyhow::Error, _replacing: bool) {
+        // The freshly opened segment is disposable: report and drop it; the
+        // next frame reopens from idle.
+        self.send_ev(AnomalyEvent::Error {
+            message: format!("ffmpeg write failed on open: {err}"),
+        });
+        self.set_last_error(format!("{err}"));
+    }
+
+    fn on_open_error(&mut self, err: anyhow::Error, _replacing: bool) {
+        self.send_ev(AnomalyEvent::Error {
+            message: format!("failed to open anomaly segment: {err}"),
+        });
+        self.set_last_error(format!("{err}"));
+    }
+
+    fn finalize_segment(&mut self, seg: Seg) {
+        let events = self.events.clone();
+        let send_ev = move |ev: AnomalyEvent| {
+            let _ = events.send(RobsEvent::Anomaly(ev));
+        };
+        register_segment(
+            seg,
+            &mut self.ring,
+            &mut self.active_export,
+            &self.status,
+            self.keep_secs,
+            &send_ev,
+        );
+    }
+
+    fn on_segment_died(&mut self, seg: Seg, err: anyhow::Error) {
+        // Heal a dead ffmpeg by finalizing the segment and letting the next
+        // frame reopen.
+        self.send_ev(AnomalyEvent::Error {
+            message: format!("ffmpeg died mid-segment: {err}"),
+        });
+        self.set_last_error(format!("{err}"));
+        self.finalize_segment(seg);
+    }
+
+    fn pre_recv(&mut self, active: &mut Option<Seg>) {
         // --- Drain trigger commands ---
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                EngineCmd::Save {
-                    clip_id,
-                    pre_roll_secs,
-                    post_roll_secs,
-                } => {
-                    if active_export.is_some() {
-                        send_ev(AnomalyEvent::ClipBusy { clip_id });
-                        continue;
-                    }
-                    // Close the in-flight segment so its footage is available as
-                    // pre-roll (active_export is None here, so no copy occurs).
-                    if let Some(seg) = active.take() {
-                        register_segment(
-                            seg,
-                            &mut ring,
-                            &mut active_export,
-                            status,
-                            keep_secs,
-                            &send_ev,
-                        );
-                    }
-                    // Stage pre-roll copies in a per-clip working dir.
-                    let pre_paths = ring.pin_pre_roll(pre_roll_secs);
-                    let work_dir = config.output_dir.join(format!("_clip_{}", clip_id));
-                    let _ = fs::create_dir_all(&work_dir);
-                    let mut files: Vec<String> = Vec::with_capacity(pre_paths.len());
-                    for p in &pre_paths {
-                        let name = format!("seg_{:04}.mkv", files.len());
-                        if fs::copy(p, work_dir.join(&name)).is_ok() {
-                            files.push(name);
-                        }
-                    }
-                    let ts = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
-                    let clip_name = format!(
-                        "{}_{}_{}{}.mp4",
-                        config.clip_prefix, ts, clip_id, config.clip_suffix
-                    );
-                    let next_file_index = files.len() as u32;
-                    let out_path = config.output_dir.join(clip_name);
-                    active_export = Some(ActiveExport {
-                        clip_id: clip_id.clone(),
-                        work_dir,
-                        out_path,
-                        files,
-                        next_file_index,
-                        post_roll_deadline: Instant::now()
-                            + Duration::from_secs(post_roll_secs),
-                    });
-                    export_active.store(true, Ordering::Release);
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            let EngineCmd::Save {
+                clip_id,
+                pre_roll_secs,
+                post_roll_secs,
+            } = cmd;
+            if self.active_export.is_some() {
+                self.send_ev(AnomalyEvent::ClipBusy { clip_id });
+                continue;
+            }
+            // Close the in-flight segment so its footage is available as
+            // pre-roll (active_export is None here, so no copy occurs).
+            if let Some(seg) = active.take() {
+                self.finalize_segment(seg);
+            }
+            // Stage pre-roll copies in a per-clip working dir.
+            let pre_paths = self.ring.pin_pre_roll(pre_roll_secs);
+            let work_dir = self.config.output_dir.join(format!("_clip_{}", clip_id));
+            let _ = fs::create_dir_all(&work_dir);
+            let mut files: Vec<String> = Vec::with_capacity(pre_paths.len());
+            for p in &pre_paths {
+                let name = format!("seg_{:04}.mkv", files.len());
+                if fs::copy(p, work_dir.join(&name)).is_ok() {
+                    files.push(name);
                 }
             }
+            let ts = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+            let clip_name = format!(
+                "{}_{}_{}{}.mp4",
+                self.config.clip_prefix, ts, clip_id, self.config.clip_suffix
+            );
+            let next_file_index = files.len() as u32;
+            let out_path = self.config.output_dir.join(clip_name);
+            self.active_export = Some(ActiveExport {
+                clip_id: clip_id.clone(),
+                work_dir,
+                out_path,
+                files,
+                next_file_index,
+                post_roll_deadline: Instant::now() + Duration::from_secs(post_roll_secs),
+            });
+            self.export_active.store(true, Ordering::Release);
         }
+    }
 
-        // --- Pull the next frame (short timeout keeps commands/deadlines live) ---
-        match rx.recv_timeout(Duration::from_millis(150)) {
-            Ok(frame) => {
-                let rotate = match active.as_ref() {
-                    None => true,
-                    Some(seg) => {
-                        !seg.dims_match(frame.width, frame.height)
-                            || seg.elapsed().as_secs() >= config.segment_duration_secs
-                    }
-                };
-                if rotate {
-                    if let Some(seg) = active.take() {
-                        register_segment(
-                            seg,
-                            &mut ring,
-                            &mut active_export,
-                            status,
-                            keep_secs,
-                            &send_ev,
-                        );
-                    }
-                    let path = buffer_dir.join(format!("seg_{:06}.mkv", segment_index));
-                    match Seg::open(config, segment_index, frame.width, frame.height, path) {
-                        Ok(mut seg) => {
-                            if let Err(e) = seg.write_frame(&frame.data) {
-                                send_ev(AnomalyEvent::Error {
-                                    message: format!("ffmpeg write failed on open: {e}"),
-                                });
-                                set_last_error(format!("{e}"));
-                            } else {
-                                active = Some(seg);
-                            }
-                        }
-                        Err(e) => {
-                            send_ev(AnomalyEvent::Error {
-                                message: format!("failed to open anomaly segment: {e}"),
-                            });
-                            set_last_error(format!("{e}"));
-                            sleep_with_stop(Duration::from_secs(1), stop_flag);
-                        }
-                    }
-                    segment_index = segment_index.wrapping_add(1);
-                } else {
-                    // Write into the active segment; heal a dead ffmpeg by
-                    // finalizing the segment and letting the next frame reopen.
-                    let write_err = active
-                        .as_mut()
-                        .and_then(|seg| seg.write_frame(&frame.data).err());
-                    if let Some(e) = write_err {
-                        send_ev(AnomalyEvent::Error {
-                            message: format!("ffmpeg died mid-segment: {e}"),
-                        });
-                        set_last_error(format!("{e}"));
-                        let dead = active
-                            .take()
-                            .expect("active segment present in write path");
-                        register_segment(
-                            dead,
-                            &mut ring,
-                            &mut active_export,
-                            status,
-                            keep_secs,
-                            &send_ev,
-                        );
-                    }
-                }
-            }
-            Err(flume::RecvTimeoutError::Timeout) => {}
-            Err(flume::RecvTimeoutError::Disconnected) => break,
-        }
-
+    fn post_frame(&mut self, active: &mut Option<Seg>) {
         // --- Finalize an in-flight export when its post-roll window elapses ---
-        let due = match active_export.as_ref() {
+        let due = match self.active_export.as_ref() {
             Some(exp) => Instant::now() >= exp.post_roll_deadline,
             None => false,
         };
-        if due {
-            let mut exp_taken = active_export
-                .take()
-                .expect("active_export present in deadline check");
-            // Fold the current post-roll segment into this export explicitly
-            // (register_segment would route it to active_export, which is None).
-            if let Some(seg) = active.take() {
-                let index = seg.index();
-                let started_utc = seg.started_utc();
-                let spath = seg.path().to_path_buf();
-                match seg.close() {
-                    Ok((bytes, duration_ms)) => {
-                        ring.push(RingEntry {
-                            path: spath.clone(),
-                            index,
-                            started_utc,
-                            duration_ms,
-                            bytes,
-                        });
-                        ring.sweep(keep_secs);
-                        if let Err(e) = copy_into_export(&mut exp_taken, &spath) {
-                            send_ev(AnomalyEvent::Error {
-                                message: format!("copy final post-roll segment: {e}"),
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        send_ev(AnomalyEvent::Error {
-                            message: format!("finalize post-roll segment: {e}"),
+        if !due {
+            return;
+        }
+        let mut exp_taken = self
+            .active_export
+            .take()
+            .expect("active_export present in deadline check");
+        // Fold the current post-roll segment into this export explicitly
+        // (finalize_segment would route it to active_export, which is None).
+        if let Some(seg) = active.take() {
+            let index = seg.index();
+            let started_utc = seg.started_utc();
+            let spath = seg.path().to_path_buf();
+            match seg.close() {
+                Ok((bytes, duration_ms)) => {
+                    self.ring.push(RingEntry {
+                        path: spath.clone(),
+                        index,
+                        started_utc,
+                        duration_ms,
+                        bytes,
+                    });
+                    self.ring.sweep(self.keep_secs);
+                    if let Err(e) = copy_into_export(&mut exp_taken, &spath) {
+                        self.send_ev(AnomalyEvent::Error {
+                            message: format!("copy final post-roll segment: {e}"),
                         });
                     }
                 }
-                status.write().buffer_secs_filled = ring.secs_filled();
+                Err(e) => {
+                    self.send_ev(AnomalyEvent::Error {
+                        message: format!("finalize post-roll segment: {e}"),
+                    });
+                }
             }
-            export_active.store(false, Ordering::Release);
-            spawn_export(exp_taken, Arc::clone(status), events.clone());
+            self.status.write().buffer_secs_filled = self.ring.secs_filled();
         }
+        self.export_active.store(false, Ordering::Release);
+        spawn_export(exp_taken, Arc::clone(&self.status), self.events.clone());
     }
 
-    // Shutdown: the in-flight segment is disposable (no finalize). Abandon any
-    // in-progress export and clean its work dir.
-    active.take();
-    if let Some(exp) = active_export.take() {
-        let _ = fs::remove_dir_all(&exp.work_dir);
-    }
-    {
-        let mut s = status.write();
-        s.buffering = false;
-        s.clips_busy = 0;
-        s.buffer_secs_filled = ring.secs_filled();
+    fn shutdown(&mut self, active: Option<Seg>) {
+        // The in-flight segment is disposable (no finalize). Abandon any
+        // in-progress export and clean its work dir.
+        drop(active);
+        if let Some(exp) = self.active_export.take() {
+            let _ = fs::remove_dir_all(&exp.work_dir);
+        }
+        {
+            let mut s = self.status.write();
+            s.buffering = false;
+            s.clips_busy = 0;
+            s.buffer_secs_filled = self.ring.secs_filled();
+        }
     }
 }
 

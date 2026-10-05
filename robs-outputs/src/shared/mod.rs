@@ -16,8 +16,12 @@
 //!   by both monitors so low/critical conditions fire once per episode
 //!   instead of flapping near the threshold.
 //! - [`segment`] — the common ffmpeg rawvideo segment writer behind
-//!   `ActiveSegment` and `ScratchSegment` (see [`SegmentOps`]).
+//!   `ActiveSegment` and `ScratchSegment` (see [`SegmentOps`]);
+//! - [`pump`] — the single parameterized worker frame-pump loop
+//!   ([`frame_pump`](pump::frame_pump)) both engines run, parameterized by
+//!   [`FramePumpPolicy`](pump::FramePumpPolicy).
 
+pub mod pump;
 pub mod segment;
 
 use std::fs;
