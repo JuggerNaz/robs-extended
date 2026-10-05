@@ -38,8 +38,9 @@ use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
 use state::{
     AnnotationState, AnomalyState, BlackboxState, EditingState, EventLogEntry, EventLogKind,
-    OverlayState, PreviewState, RecordState, StreamState, TelemetryState,
+    OverlayState, PreviewState, RecordState, StreamState,
 };
+use telemetry::TelemetryService;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -105,7 +106,9 @@ pub struct RobsController {
     // User-toggled short-clip anomaly capture buffer.
     pub anomaly: AnomalyState,
     // Serial data-string telemetry feed (ROV nav strings over a COM port).
-    pub telemetry: TelemetryState,
+    // Service owning the `TelemetryState` cluster (field access flows
+    // through `Deref`, so view code is unchanged).
+    pub telemetry: TelemetryService,
     // Scene overlays: the baked data-string boxes + the company logo.
     pub overlay: OverlayState,
     // QID rail: structure components from the inspection DB + click-marked
@@ -316,7 +319,7 @@ impl RobsController {
                     session_override: None,
                 }
             },
-            telemetry: TelemetryState::new(
+            telemetry: TelemetryService::new(
                 robs_profiles::settings::SerialTelemetrySettings::load_or_default(),
             ),
             overlay: OverlayState::default(),
