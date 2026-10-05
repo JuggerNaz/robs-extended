@@ -39,8 +39,9 @@ use robs_encoding::detect_encoders;
 use overlay::OverlayService;
 use state::{
     AnnotationState, AnomalyState, BlackboxState, EditingState, EventLogEntry, EventLogKind,
-    PreviewState, RecordState, StreamState,
+    PreviewState, RecordState,
 };
+use stream::StreamService;
 use telemetry::TelemetryService;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -81,9 +82,11 @@ pub struct RobsController {
     // Direct DXGI Desktop Duplication capture (GPU-accelerated), shared by
     // preview and recording.
     pub dxgi_manager: Option<DxgiCaptureManager>,
-    // Cohesive state clusters (definitions in `state.rs`).
+    // Cohesive state clusters (definitions in `state.rs`). Services own
+    // their cluster; field access flows through `Deref`, so view code is
+    // unchanged.
     pub record: RecordState,
-    pub stream: StreamState,
+    pub stream: StreamService,
     pub preview: PreviewState,
     pub annotation: AnnotationState,
     pub editing: EditingState,
@@ -239,14 +242,7 @@ impl RobsController {
                 clip_export_pending: 0,
                 clip_marking_supported: false,
             },
-            stream: StreamState {
-                ffmpeg_handle: None,
-                writer_thread: None,
-                stop_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                frame_sender: None,
-                timer_last_tick: None,
-                frame_count: 0,
-            },
+            stream: StreamService::new(),
             preview: PreviewState {
                 preview_capture_active: false,
                 preview_frame_sender: None,
