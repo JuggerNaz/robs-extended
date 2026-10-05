@@ -39,9 +39,8 @@ use robs_encoding::detect_encoders;
 use anomaly::AnomalyService;
 use blackbox::BlackboxService;
 use overlay::OverlayService;
-use state::{
-    AnnotationState, EditingState, EventLogEntry, EventLogKind, PreviewState, RecordState,
-};
+use record::RecordService;
+use state::{AnnotationState, EditingState, EventLogEntry, EventLogKind, PreviewState};
 use stream::StreamService;
 use telemetry::TelemetryService;
 use std::collections::VecDeque;
@@ -86,7 +85,7 @@ pub struct RobsController {
     // Cohesive state clusters (definitions in `state.rs`). Services own
     // their cluster; field access flows through `Deref`, so view code is
     // unchanged.
-    pub record: RecordState,
+    pub record: RecordService,
     pub stream: StreamService,
     pub preview: PreviewState,
     pub annotation: AnnotationState,
@@ -223,28 +222,7 @@ impl RobsController {
             // Direct DXGI Desktop Duplication capture
             dxgi_manager: None, // Initialized lazily on first capture
             // Cohesive state clusters (see `state.rs`)
-            record: RecordState {
-                recording: false,
-                recording_paused: false,
-                recording_time: 0,
-                recording_start_time: None,
-                last_recording_path: String::new(),
-                session_dir: None,
-                recording_file_output: None,
-                ffmpeg_recording_handle: None,
-                recording_dxgi_thread: None,
-                recording_stop_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                recording_frame_sender: None,
-                recording_ffmpeg_stdin: None,
-                last_frame_time: None,
-                timer_last_tick: None,
-                frame_count: 0,
-                clip_marks: Vec::new(),
-                clip_mark_start: None,
-                clip_export_rx: None,
-                clip_export_pending: 0,
-                clip_marking_supported: false,
-            },
+            record: RecordService::new(),
             stream: StreamService::new(),
             preview: PreviewState {
                 preview_capture_active: false,

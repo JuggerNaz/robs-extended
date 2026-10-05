@@ -15,7 +15,12 @@
 //! Unlike the Anomaly rolling buffer, marks cannot retro-capture the past
 //! and require a live recording; the buffer remains the tool for the
 //! no-recording retro case.
+//!
+//! Mark/export state lives on [`RecordService`]; the [`RobsController`]
+//! delegates at the bottom keep the call surface the view layer and
+//! `handle_events` already use.
 
+use super::record::RecordService;
 use super::state::EventLogKind;
 use super::RobsController;
 
@@ -100,44 +105,48 @@ pub struct ClipExportResult {
     pub(crate) message: Option<String>,
 }
 
-impl RobsController {
-    /// Mark In / Mark Out button handler. Requires a live recording; allowed
-    /// while paused (the paused position is the resume point, which is still
-    /// the correct content time).
-    pub fn toggle_clip_mark(&mut self) {
-        if !self.record.recording {
-            return;
+impl RecordService {
+    /// Mark In / Mark Out. Requires a live recording; allowed while paused
+    /// (the paused position is the resume point, which is still the correct
+    /// content time). Returns the event-log lines, in order.
+    pub(crate) fn toggle_clip_mark(&mut self, fps: f32) -> Vec<(String, EventLogKind)> {
+        if !self.recording {
+            return Vec::new();
         }
-        let fps = self.fps_setting;
-        match apply_mark_toggle(self.record.clip_mark_start, self.record.frame_count) {
+        let mut logs = Vec::new();
+        match apply_mark_toggle(self.clip_mark_start, self.frame_count) {
             MarkAction::Opened(start) => {
-                self.record.clip_mark_start = Some(start);
-                self.log_event(
+                self.clip_mark_start = Some(start);
+                logs.push((
                     format!(
                         "Clip mark in at {}",
-                        Self::format_time((start as f32 / fps) as u64)
+                        crate::RobsController::format_time((start as f32 / fps) as u64)
                     ),
                     EventLogKind::Record,
-                );
+                ));
             }
             MarkAction::Closed { start, end, pushed } => {
-                self.record.clip_mark_start = None;
+                self.clip_mark_start = None;
                 if pushed {
-                    self.record.clip_marks.push(ClipMark::new(start, end));
-                    let queued = self.record.clip_marks.len();
-                    self.log_event(
+                    self.clip_marks.push(ClipMark::new(start, end));
+                    let queued = self.clip_marks.len();
+                    logs.push((
                         format!(
                             "Clip marked {}\u{2013}{} ({queued} queued)",
-                            Self::format_time((start as f32 / fps) as u64),
-                            Self::format_time((end as f32 / fps) as u64),
+                            crate::RobsController::format_time((start as f32 / fps) as u64),
+                            crate::RobsController::format_time((end as f32 / fps) as u64),
                         ),
                         EventLogKind::Record,
-                    );
+                    ));
                 } else {
-                    self.log_event("Clip mark too short, discarded", EventLogKind::Record);
+                    logs.push((
+                        "Clip mark too short, discarded".to_string(),
+                        EventLogKind::Record,
+                    ));
                 }
             }
         }
+        logs
     }
 
     /// Hand closed marks to a background thread that stream-copies each span
@@ -145,8 +154,8 @@ impl RobsController {
     /// already blocks the UI thread — cutting must not happen inline).
     pub(crate) fn start_clip_exports(&mut self, recording_path: String, marks: Vec<ClipMark>, fps: f32) {
         let (tx, rx) = std::sync::mpsc::channel::<ClipExportResult>();
-        self.record.clip_export_rx = Some(rx);
-        self.record.clip_export_pending = marks.len() as u32;
+        self.clip_export_rx = Some(rx);
+        self.clip_export_pending = marks.len() as u32;
 
         std::thread::spawn(move || {
             let input = std::path::Path::new(&recording_path);
@@ -222,7 +231,7 @@ impl RobsController {
 
     /// Drain pending export results (mirrors the Anomaly event drain).
     pub(crate) fn drain_clip_export_events(&mut self) -> Vec<ClipExportResult> {
-        let Some(rx) = self.record.clip_export_rx.as_ref() else {
+        let Some(rx) = self.clip_export_rx.as_ref() else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -232,19 +241,50 @@ impl RobsController {
         out
     }
 
-    /// Log each result and release its busy slot.
-    pub(crate) fn apply_clip_export_events(&mut self, events: Vec<ClipExportResult>) {
+    /// Release each result's busy slot and turn it into an event-log line,
+    /// in arrival order for the facade to log.
+    pub(crate) fn apply_clip_export_events(
+        &mut self,
+        events: Vec<ClipExportResult>,
+    ) -> Vec<(String, EventLogKind)> {
+        let mut logs = Vec::new();
         for ev in events {
-            self.record.clip_export_pending = self.record.clip_export_pending.saturating_sub(1);
+            self.clip_export_pending = self.clip_export_pending.saturating_sub(1);
             if ev.ok {
-                self.log_event(format!("Clip saved: {}", ev.path), EventLogKind::Record);
+                logs.push((format!("Clip saved: {}", ev.path), EventLogKind::Record));
             } else {
                 let detail = ev.message.unwrap_or_else(|| "unknown error".to_string());
-                self.log_event(
+                logs.push((
                     format!("Clip export failed ({}): {detail}", ev.index + 1),
                     EventLogKind::Record,
-                );
+                ));
             }
+        }
+        logs
+    }
+}
+
+impl RobsController {
+    /// Mark In / Mark Out button handler (delegates to
+    /// [`RecordService::toggle_clip_mark`]).
+    pub fn toggle_clip_mark(&mut self) {
+        let fps = self.fps_setting;
+        for (message, kind) in self.record.toggle_clip_mark(fps) {
+            self.log_event(message, kind);
+        }
+    }
+
+    /// Drain pending export results (delegates to
+    /// [`RecordService::drain_clip_export_events`]).
+    pub(crate) fn drain_clip_export_events(&mut self) -> Vec<ClipExportResult> {
+        self.record.drain_clip_export_events()
+    }
+
+    /// Log each result and release its busy slot (delegates to
+    /// [`RecordService::apply_clip_export_events`]).
+    pub(crate) fn apply_clip_export_events(&mut self, events: Vec<ClipExportResult>) {
+        for (message, kind) in self.record.apply_clip_export_events(events) {
+            self.log_event(message, kind);
         }
     }
 }
