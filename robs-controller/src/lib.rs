@@ -36,10 +36,11 @@ use robs_chat::message::{ChatEvent, UnifiedChatMessage};
 use robs_core::traits::VideoSource;
 use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
+use blackbox::BlackboxService;
 use overlay::OverlayService;
 use state::{
-    AnnotationState, AnomalyState, BlackboxState, EditingState, EventLogEntry, EventLogKind,
-    PreviewState, RecordState,
+    AnnotationState, AnomalyState, EditingState, EventLogEntry, EventLogKind, PreviewState,
+    RecordState,
 };
 use stream::StreamService;
 use telemetry::TelemetryService;
@@ -105,8 +106,9 @@ pub struct RobsController {
     pub snapshot_flash: Option<std::time::Instant>,
     // Text overlays (persistent on-screen text baked into recordings).
     pub text_overlays: Vec<robs_core::TextOverlay>,
-    // Always-on background safety recorder.
-    pub blackbox: BlackboxState,
+    // Always-on background safety recorder. Service owning the
+    // `BlackboxState` cluster (field access flows through `Deref`).
+    pub blackbox: BlackboxService,
     // User-toggled short-clip anomaly capture buffer.
     pub anomaly: AnomalyState,
     // Serial data-string telemetry feed (ROV nav strings over a COM port).
@@ -286,25 +288,7 @@ impl RobsController {
             snapshot_seq: 0,
             snapshot_flash: None,
             text_overlays: Vec::new(),
-            blackbox: {
-                let (bus, rx) = robs_core::EventBus::new();
-                let mut settings = robs_profiles::settings::BlackboxSettings::default();
-                // Default the encoder to the best available hardware/software.
-                if detection.nvenc_available {
-                    settings.encoder = "h264_nvenc".into();
-                } else {
-                    settings.encoder = "libx264".into();
-                }
-                BlackboxState {
-                    enabled: settings.enabled,
-                    settings,
-                    engine: None,
-                    status: robs_core::event::BlackboxStatus::default(),
-                    event_tx: bus.tx(),
-                    event_rx: Some(rx),
-                    session_override: None,
-                }
-            },
+            blackbox: BlackboxService::new(detection.nvenc_available),
             anomaly: {
                 let (bus, rx) = robs_core::EventBus::new();
                 AnomalyState {

@@ -167,6 +167,16 @@ pub struct AnnotationState {
     pub record_font: Option<ab_glyph::FontVec>,
 }
 
+/// The active output geometry + frame rate, passed to engine services that
+/// project user settings into a runtime config. Mirrors the flat facade
+/// fields (`output_width` / `output_height` / `fps_setting`) so the services
+/// need no back-reference to `RobsController`.
+pub struct OutputSpec {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f32,
+}
+
 /// Always-on Blackbox Dual Recording Engine state.
 ///
 /// Owns the engine (lazily (re)built from `settings`), the latest published
