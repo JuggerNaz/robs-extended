@@ -115,8 +115,9 @@ pub struct RobsController {
     // `Deref`, so view code is unchanged).
     pub overlay: OverlayService,
     // QID rail: structure components from the inspection DB + click-marked
-    // recording time segments (see `qid.rs` / `db.rs`).
-    pub qid: qid::QidState,
+    // recording time segments (see `qid.rs` / `db.rs`). Service owning the
+    // `QidState` cluster (field access flows through `Deref`).
+    pub qid: qid::QidService,
 }
 
 impl RobsController {
@@ -331,9 +332,9 @@ impl RobsController {
                 let worker = settings
                     .is_configured()
                     .then(|| db::spawn(settings.clone()));
-                let mut state = qid::QidState::new(settings);
-                state.db = worker;
-                state
+                let mut service = qid::QidService::new(settings);
+                service.db = worker;
+                service
             },
         }
     }
