@@ -15,6 +15,10 @@
 //! - [`LatchedFlag`] — boolean latch with hysteresis-controlled release, used
 //!   by both monitors so low/critical conditions fire once per episode
 //!   instead of flapping near the threshold.
+//! - [`segment`] — the common ffmpeg rawvideo segment writer behind
+//!   `ActiveSegment` and `ScratchSegment` (see [`SegmentOps`]).
+
+pub mod segment;
 
 use std::fs;
 use std::path::Path;
