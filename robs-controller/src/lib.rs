@@ -36,11 +36,11 @@ use robs_chat::message::{ChatEvent, UnifiedChatMessage};
 use robs_core::traits::VideoSource;
 use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
+use anomaly::AnomalyService;
 use blackbox::BlackboxService;
 use overlay::OverlayService;
 use state::{
-    AnnotationState, AnomalyState, EditingState, EventLogEntry, EventLogKind, PreviewState,
-    RecordState,
+    AnnotationState, EditingState, EventLogEntry, EventLogKind, PreviewState, RecordState,
 };
 use stream::StreamService;
 use telemetry::TelemetryService;
@@ -109,8 +109,9 @@ pub struct RobsController {
     // Always-on background safety recorder. Service owning the
     // `BlackboxState` cluster (field access flows through `Deref`).
     pub blackbox: BlackboxService,
-    // User-toggled short-clip anomaly capture buffer.
-    pub anomaly: AnomalyState,
+    // User-toggled short-clip anomaly capture buffer. Service owning the
+    // `AnomalyState` cluster (field access flows through `Deref`).
+    pub anomaly: AnomalyService,
     // Serial data-string telemetry feed (ROV nav strings over a COM port).
     // Service owning the `TelemetryState` cluster (field access flows
     // through `Deref`, so view code is unchanged).
@@ -289,20 +290,7 @@ impl RobsController {
             snapshot_flash: None,
             text_overlays: Vec::new(),
             blackbox: BlackboxService::new(detection.nvenc_available),
-            anomaly: {
-                let (bus, rx) = robs_core::EventBus::new();
-                AnomalyState {
-                    enabled: false,
-                    // Persisted settings (config dir `settings.json`); defaults
-                    // on first run or an unreadable file.
-                    settings: robs_profiles::settings::AnomalySettings::load_or_default(),
-                    engine: None,
-                    status: robs_core::event::AnomalyStatus::default(),
-                    event_tx: bus.tx(),
-                    event_rx: Some(rx),
-                    session_override: None,
-                }
-            },
+            anomaly: AnomalyService::new(),
             telemetry: TelemetryService::new(
                 robs_profiles::settings::SerialTelemetrySettings::load_or_default(),
             ),
