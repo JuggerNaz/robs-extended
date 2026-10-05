@@ -29,7 +29,7 @@ pub mod devices;
 pub mod dxgi_capture;
 pub mod state;
 
-use crate::dxgi_capture::DxgiCaptureManager;
+use capture::PreviewService;
 use parking_lot::RwLock;
 use robs_chat::aggregator::ChatAggregator;
 use robs_chat::message::{ChatEvent, UnifiedChatMessage};
@@ -40,7 +40,7 @@ use anomaly::AnomalyService;
 use blackbox::BlackboxService;
 use overlay::OverlayService;
 use record::RecordService;
-use state::{AnnotationState, EditingState, EventLogEntry, EventLogKind, PreviewState};
+use state::{AnnotationState, EditingState, EventLogEntry, EventLogKind};
 use stream::StreamService;
 use telemetry::TelemetryService;
 use std::collections::VecDeque;
@@ -79,15 +79,14 @@ pub struct RobsController {
     // Active video source (kept flat: a single transient box).
     #[allow(dead_code)]
     pub active_video_source: Option<Box<dyn VideoSource>>,
-    // Direct DXGI Desktop Duplication capture (GPU-accelerated), shared by
-    // preview and recording.
-    pub dxgi_manager: Option<DxgiCaptureManager>,
     // Cohesive state clusters (definitions in `state.rs`). Services own
     // their cluster; field access flows through `Deref`, so view code is
-    // unchanged.
+    // unchanged. The preview service also owns the shared DXGI capture
+    // manager; the window-HWND and webcam-capture maps stay flat on the
+    // facade because the view layer mutates them in place.
     pub record: RecordService,
     pub stream: StreamService,
-    pub preview: PreviewState,
+    pub preview: PreviewService,
     pub annotation: AnnotationState,
     pub editing: EditingState,
     // Maps scene-item IDs to window handles (HWND) for window-capture sources.
@@ -219,23 +218,10 @@ impl RobsController {
             aac_available: detection.aac_available,
             ffmpeg_available: detection.ffmpeg_available,
             active_video_source: None,
-            // Direct DXGI Desktop Duplication capture
-            dxgi_manager: None, // Initialized lazily on first capture
             // Cohesive state clusters (see `state.rs`)
             record: RecordService::new(),
             stream: StreamService::new(),
-            preview: PreviewState {
-                preview_capture_active: false,
-                preview_frame_sender: None,
-                preview_frame_receiver: None,
-                preview_capture_handle: None,
-                preview_frame_count: 0,
-                last_preview_capture: std::time::Instant::now(),
-                frame_buffer: std::collections::HashMap::new(),
-                preview_frames: std::collections::HashMap::new(),
-                next_frame_version: 0,
-                last_output_frame: None,
-            },
+            preview: PreviewService::new(),
             annotation: AnnotationState {
                 show_annotations: true,
                 annotations: Vec::new(),
@@ -347,9 +333,9 @@ impl RobsController {
 
         // Manage preview capture based on source visibility.
         if has_capture_source && !self.preview.preview_capture_active {
-            self.start_preview_capture();
+            self.preview.start_capture();
         } else if !has_capture_source && self.preview.preview_capture_active {
-            self.stop_preview_capture();
+            self.preview.stop_capture();
         }
 
         wake
