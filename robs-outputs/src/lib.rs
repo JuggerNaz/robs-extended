@@ -1,3 +1,5 @@
+mod shared;
+
 pub mod anomaly;
 pub mod blackbox;
 pub mod report;

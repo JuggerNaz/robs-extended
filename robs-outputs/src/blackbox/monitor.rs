@@ -27,7 +27,7 @@ use robs_core::event::{BlackboxEvent, BlackboxStatus, EventTx, RobsEvent};
 
 use super::config::BlackboxConfig;
 use super::sink::BlackboxSink;
-use super::{build_storage_status, now_ms};
+use crate::shared::{build_storage_status, now_ms, LatchedFlag};
 
 /// How often to probe and publish. Short enough to be responsive, long enough
 /// that a free-space syscall + dir scan is negligible.
@@ -83,8 +83,8 @@ fn monitor_loop(
     let critical = config.disk_low_critical_percent as f32;
     let stall_secs = config.stall_threshold_secs;
 
-    let mut was_low = false;
-    let mut was_critical = false;
+    let mut low_flag = LatchedFlag::new();
+    let mut critical_flag = LatchedFlag::new();
     let mut was_stalled = false;
     let mut last_status_emit = Instant::now() - TICK; // force an immediate first publish
 
@@ -95,25 +95,25 @@ fn monitor_loop(
         let s = sink.storage_status();
         let free_pct = s.free_percent();
 
-        // LOW warning (informational; does not pause ingestion).
+        // LOW warning (informational; does not pause ingestion). The latch
+        // only releases once the free percentage has cleared the threshold by
+        // HYSTERESIS points, so the event fires once per episode.
         let now_low = free_pct <= warn && s.total_bytes > 0;
-        if now_low && !was_low {
+        let (was_low, low_rose) = low_flag.update(now_low, free_pct > warn + HYSTERESIS);
+        if low_rose {
             send(BlackboxEvent::StorageLow {
                 free_bytes: s.free_bytes,
                 total_bytes: s.total_bytes,
                 free_percent: free_pct,
             });
         }
-        if !now_low && was_low && free_pct > warn + HYSTERESIS {
-            was_low = false;
-        } else if now_low {
-            was_low = true;
-        }
 
         // CRITICAL: flip the flag that pauses ingestion + writes.
         let now_critical = free_pct <= critical && s.total_bytes > 0;
+        let (was_critical, critical_rose) =
+            critical_flag.update(now_critical, free_pct > critical + HYSTERESIS);
         disk_critical.store(now_critical, Ordering::Release);
-        if now_critical && !was_critical {
+        if critical_rose {
             send(BlackboxEvent::StorageCritical {
                 free_bytes: s.free_bytes,
                 total_bytes: s.total_bytes,
@@ -124,11 +124,6 @@ fn monitor_loop(
                     message: format!("reclaim failed: {e}"),
                 });
             }
-        }
-        if !now_critical && was_critical && free_pct > critical + HYSTERESIS {
-            was_critical = false;
-        } else if now_critical {
-            was_critical = true;
         }
 
         // --- Capture stall detection ---

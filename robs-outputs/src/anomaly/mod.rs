@@ -40,21 +40,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use flume::{Receiver, Sender, TrySendError};
 use parking_lot::RwLock;
 
 use robs_core::event::{AnomalyEvent, AnomalyStatus, EventTx, RobsEvent};
 
-use segment::ScratchSegment as Seg;
+use crate::shared::{now_ms, sleep_with_stop, FrameInput};
 
-/// One raw captured frame handed to the engine.
-struct FrameInput {
-    data: Vec<u8>,
-    width: u32,
-    height: u32,
-}
+use segment::ScratchSegment as Seg;
 
 /// Command channel message: request a clip export.
 enum EngineCmd {
@@ -286,27 +281,6 @@ impl AnomalyCaptureEngine {
 impl Drop for AnomalyCaptureEngine {
     fn drop(&mut self) {
         self.stop();
-    }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Sleep for `d`, but wake early if `stop_flag` becomes set.
-fn sleep_with_stop(d: Duration, stop_flag: &AtomicBool) {
-    let step = Duration::from_millis(100);
-    let mut remaining = d;
-    while remaining > Duration::ZERO {
-        if stop_flag.load(Ordering::SeqCst) {
-            return;
-        }
-        let t = remaining.min(step);
-        std::thread::sleep(t);
-        remaining = remaining.saturating_sub(t);
     }
 }
 

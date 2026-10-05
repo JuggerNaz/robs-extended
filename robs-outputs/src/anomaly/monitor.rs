@@ -14,7 +14,6 @@
 //! — keeping the two threads free of cross-synchronization, like the Blackbox
 //! monitor.
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -25,7 +24,7 @@ use parking_lot::RwLock;
 use robs_core::event::{AnomalyEvent, AnomalyStorageStatus, EventTx, RobsEvent};
 
 use super::config::AnomalyConfig;
-use super::{now_ms, sleep_with_stop};
+use crate::shared::{free_percent, now_ms, probe_free_space, sleep_with_stop, LatchedFlag};
 
 /// How often to probe and publish.
 const TICK: Duration = Duration::from_secs(2);
@@ -71,18 +70,19 @@ fn monitor_loop(
     };
     let warn = config.disk_low_warn_percent as f32;
     let mut was_ready = false;
+    // Pass-through latch: the anomaly monitor reports the raw condition each
+    // tick (no hysteresis margin) rather than latching an episode like the
+    // blackbox monitor's StorageLow/StorageCritical events.
+    let mut low_flag = LatchedFlag::new();
 
     while !stop_flag.load(Ordering::SeqCst) {
         let tick_start = Instant::now();
 
         // --- Disk-space probe ---
-        let (free, total) = probe_space(&config.output_dir);
-        let free_pct = if total == 0 {
-            0.0
-        } else {
-            (free as f64 / total as f64 * 100.0) as f32
-        };
-        let low = free_pct <= warn && total > 0;
+        let (free, total) = probe_free_space(&config.output_dir);
+        let free_pct = free_percent(free, total);
+        let now_low = free_pct <= warn && total > 0;
+        let (low, _) = low_flag.update(now_low, true);
 
         // --- Fold live signals + storage into status, capture buffer fill ---
         let secs_filled;
@@ -121,20 +121,3 @@ fn monitor_loop(
         sleep_with_stop(TICK.saturating_sub(tick_start.elapsed()), stop_flag);
     }
 }
-
-/// Probe free/total bytes on the volume holding `dir` (falling back to its
-/// parent when the dir does not yet exist). Returns zeros on failure.
-fn probe_space(dir: &Path) -> (u64, u64) {
-    let probe = if fs::metadata(dir).is_ok() {
-        dir.to_path_buf()
-    } else if let Some(parent) = dir.parent() {
-        parent.to_path_buf()
-    } else {
-        return (0, 0);
-    };
-    let total = fs4::total_space(&probe).unwrap_or(0);
-    let free = fs4::free_space(&probe).unwrap_or(0);
-    (free, total)
-}
-
-use std::fs;

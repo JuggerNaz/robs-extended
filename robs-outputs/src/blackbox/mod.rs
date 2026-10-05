@@ -34,22 +34,17 @@ pub use sink::{BlackboxSink, LocalFileSink, SegmentInfo, StorageStatus};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use flume::{Receiver, Sender, TrySendError};
 use parking_lot::RwLock;
 
-use robs_core::event::{BlackboxEvent, BlackboxStatus, BlackboxStorageStatus, EventTx, RobsEvent};
+use robs_core::event::{BlackboxEvent, BlackboxStatus, EventTx, RobsEvent};
+
+use crate::shared::{now_ms, sleep_with_stop, FrameInput};
 
 use recovery::recover;
 use segment::ActiveSegment as Seg;
-
-/// One raw captured frame handed to the engine.
-struct FrameInput {
-    data: Vec<u8>,
-    width: u32,
-    height: u32,
-}
 
 /// The Blackbox engine. Owns the worker + monitor threads and the frame
 /// channel. Construct with [`BlackboxEngine::new`], then [`start`](Self::start)
@@ -244,13 +239,6 @@ impl Drop for BlackboxEngine {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Spawn the writer/rotation worker thread.
@@ -508,37 +496,3 @@ fn close_segment(
     finalized_bytes
 }
 
-/// Sleep for `d`, but wake early if `stop_flag` becomes set.
-fn sleep_with_stop(d: Duration, stop_flag: &AtomicBool) {
-    let step = Duration::from_millis(100);
-    let mut remaining = d;
-    while remaining > Duration::ZERO {
-        if stop_flag.load(Ordering::SeqCst) {
-            return;
-        }
-        let t = remaining.min(step);
-        std::thread::sleep(t);
-        remaining = remaining.saturating_sub(t);
-    }
-}
-
-/// Re-export so `monitor` can build storage snapshots for status.
-pub(crate) fn build_storage_status(
-    free_bytes: u64,
-    total_bytes: u64,
-    warn: bool,
-    critical: bool,
-) -> BlackboxStorageStatus {
-    let free_percent = if total_bytes == 0 {
-        0.0
-    } else {
-        (free_bytes as f64 / total_bytes as f64 * 100.0) as f32
-    };
-    BlackboxStorageStatus {
-        free_bytes,
-        total_bytes,
-        free_percent,
-        low_warning: warn,
-        critical,
-    }
-}
