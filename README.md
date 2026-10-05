@@ -48,16 +48,29 @@ ROBS is organized as a Rust workspace with modular crates:
 | Crate | Purpose |
 |-------|---------|
 | `robs-core` | Core types, traits, pipeline, event system, error handling |
+| `robs-controller` | Framework-agnostic application engine (scenes, sources, recording, streaming, overlays, chat plumbing) — no UI dependencies |
 | `robs-video` | Video processing pipeline and frame handling |
 | `robs-audio` | Audio sources, mixing, and processing |
 | `robs-encoding` | Encoder implementations (x264 with extensible trait system) |
-| `robs-outputs` | RTMP streaming, file recording, multi-destination output |
+| `robs-outputs` | RTMP streaming, file recording, multi-destination output; hosts the blackbox and anomaly clip engines with a shared module |
 | `robs-sources` | Capture sources (window, monitor, game, test pattern) |
 | `robs-ui-slint` | Slint-based graphical user interface |
 | `robs-plugins` | Plugin architecture with dynamic library loading |
 | `robs-profiles` | Profile management and settings persistence |
 | `robs-chat` | Multi-platform chat aggregation (Twitch, YouTube) |
 | `robs` | Main application binary |
+
+### Engine and services
+
+`robs-controller` is the framework-agnostic engine behind the UI: the
+`RobsController` facade exposes the full feature set, and internally the engine
+is being decomposed into focused services — `RecordService`, `StreamService`,
+`PreviewService`, `BlackboxService`, `AnomalyService`, `QidService`,
+`TelemetryService`, and `OverlayService`. The `robs-outputs` crate hosts the
+blackbox/anomaly engines plus their shared encode module, so the service layer
+stays a thin coordinator on top of them. The Slint front-end (`robs-ui-slint`)
+talks only to `RobsController`; the old egui front-end (`robs-ui`) has been
+removed.
 
 ## Platform Support
 
@@ -166,7 +179,7 @@ The project builds and runs with:
 - Cross-platform workspace configuration (`rust-toolchain.toml`, `.cargo/config.toml` are platform-neutral; Windows-only flags are scoped to the Windows target)
 - FFmpeg dependency detection on startup
 - NVENC hardware acceleration detection with graceful fallback
-- `cargo test --workspace` test suite (97 tests) passing on Windows and macOS
+- `cargo test --workspace` test suite passing on Windows and macOS
 
 ## Design Goals
 
