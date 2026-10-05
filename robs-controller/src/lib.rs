@@ -36,9 +36,10 @@ use robs_chat::message::{ChatEvent, UnifiedChatMessage};
 use robs_core::traits::VideoSource;
 use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
+use overlay::OverlayService;
 use state::{
     AnnotationState, AnomalyState, BlackboxState, EditingState, EventLogEntry, EventLogKind,
-    OverlayState, PreviewState, RecordState, StreamState,
+    PreviewState, RecordState, StreamState,
 };
 use telemetry::TelemetryService;
 use std::collections::VecDeque;
@@ -110,7 +111,9 @@ pub struct RobsController {
     // through `Deref`, so view code is unchanged).
     pub telemetry: TelemetryService,
     // Scene overlays: the baked data-string boxes + the company logo.
-    pub overlay: OverlayState,
+    // Service owning the `OverlayState` cluster (field access flows through
+    // `Deref`, so view code is unchanged).
+    pub overlay: OverlayService,
     // QID rail: structure components from the inspection DB + click-marked
     // recording time segments (see `qid.rs` / `db.rs`).
     pub qid: qid::QidState,
@@ -322,7 +325,7 @@ impl RobsController {
             telemetry: TelemetryService::new(
                 robs_profiles::settings::SerialTelemetrySettings::load_or_default(),
             ),
-            overlay: OverlayState::default(),
+            overlay: OverlayService::default(),
             qid: {
                 let settings = robs_profiles::settings::DatabaseSettings::load_or_default();
                 let worker = settings
