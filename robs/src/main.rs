@@ -1,29 +1,21 @@
 use robs_chat::aggregator::ChatAggregator;
 use robs_chat::message::ChatPlatform;
 use robs_controller::RobsController;
-use robs_ui::RobsApp;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// `--ui slint|egui` selector (default `egui` until the Slint shell reaches
-/// parity in Phase 4).
-fn parse_ui_choice() -> &'static str {
-    let mut choice = "egui";
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
+/// The egui front-end (`robs-ui`) was removed; Slint is the only UI. `--ui`
+/// is still accepted (and ignored, along with its value) so existing
+/// launchers that pass `--ui slint` keep working unchanged.
+fn warn_if_ui_flag() {
+    for arg in std::env::args().skip(1) {
         if arg == "--ui" {
-            match args.next().as_deref() {
-                Some("slint") => choice = "slint",
-                Some("egui") => {}
-                Some(other) => {
-                    eprintln!("[ROBS] Unknown --ui value '{other}', falling back to egui")
-                }
-                None => eprintln!("[ROBS] --ui expects a value, falling back to egui"),
-            }
+            eprintln!(
+                "[ROBS] The egui UI was removed; Slint is the only front-end. Ignoring --ui and its value."
+            );
             break;
         }
     }
-    choice
 }
 
 fn main() {
@@ -34,7 +26,7 @@ fn main() {
 
     println!("[DEBUG] ROBS starting...");
     eprintln!("[DEBUG] ROBS starting (stderr)...");
-    
+
     // Set up panic hook to capture any crashes
     std::panic::set_hook(Box::new(|info| {
         let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
@@ -44,20 +36,23 @@ fn main() {
         } else {
             "Unknown panic".to_string()
         };
-        
-        let location = info.location()
+
+        let location = info
+            .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "unknown".to_string());
-        
+
         eprintln!("[PANIC] {} at {}", msg, location);
     }));
 
-    println!(r#"
+    println!(
+        r#"
     ╔═════════════════════════════════════════╗
     ║         ROBS - Rust OBS Studio          ║
     ║         Version: 0.1.0                  ║
     ╚═════════════════════════════════════════╝
-    "#);
+    "#
+    );
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (chat_tx, chat_rx) = mpsc::channel(1000);
@@ -91,37 +86,14 @@ fn main() {
         }
     });
 
-    println!("[ROBS] Starting UI...");
+    warn_if_ui_flag();
 
-    if parse_ui_choice() == "slint" {
-        let controller = RobsController::new().with_chat(chat_aggregator.clone(), chat_rx);
-        if let Err(err) = robs_ui_slint::run(controller) {
-            eprintln!("[ROBS] Slint UI exited with error: {err}");
-        }
-        return;
+    println!("[ROBS] Starting Slint UI...");
+
+    let controller = RobsController::new().with_chat(chat_aggregator.clone(), chat_rx);
+    if let Err(err) = robs_ui_slint::run(controller) {
+        eprintln!("[ROBS] Slint UI exited with error: {err}");
     }
-
-    let native_options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 720.0])
-            .with_min_inner_size([800.0, 600.0])
-            .with_title("ROBS"),
-        ..Default::default()
-    };
-
-    let chat_rx = Some(chat_rx);
-
-    let _ = eframe::run_native(
-        "ROBS",
-        native_options,
-        Box::new(move |cc| {
-            let mut app = RobsApp::new(cc);
-            if let Some(rx) = chat_rx {
-                app = app.with_chat(chat_aggregator.clone(), rx);
-            }
-            Ok(Box::new(app))
-        }),
-    );
 }
 
 fn create_mock_chat_message(platform: ChatPlatform, channel: &str, user: &str, content: &str) -> robs_chat::message::UnifiedChatMessage {

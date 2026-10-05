@@ -14,7 +14,7 @@ robs-profiles.workspace = true
 robs-chat.workspace = true
 parking_lot.workspace = true
 chrono.workspace = true
-# Not in workspace deps; mirrors the version `robs-ui` uses.
+# File-dialog support for export/save pickers.
 rfd = "0.15"
 
 [build-dependencies]

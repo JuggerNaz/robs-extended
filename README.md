@@ -53,8 +53,7 @@ ROBS is organized as a Rust workspace with modular crates:
 | `robs-encoding` | Encoder implementations (x264 with extensible trait system) |
 | `robs-outputs` | RTMP streaming, file recording, multi-destination output |
 | `robs-sources` | Capture sources (window, monitor, game, test pattern) |
-| `robs-ui` | egui-based graphical user interface |
-| `robs-ui-slint` | Slint-based graphical user interface (newer front-end) |
+| `robs-ui-slint` | Slint-based graphical user interface |
 | `robs-plugins` | Plugin architecture with dynamic library loading |
 | `robs-profiles` | Profile management and settings persistence |
 | `robs-chat` | Multi-platform chat aggregation (Twitch, YouTube) |
@@ -117,11 +116,7 @@ On Windows the compiled binary will be at `target\x86_64-pc-windows-msvc\release
 cargo run
 ```
 
-To try the newer Slint front-end (the egui UI remains the default for now):
-
-```bash
-cargo run -- --ui slint
-```
+The Slint front-end is the only UI; `--ui <frontend>` is still accepted for launcher compatibility but ignored.
 
 ## Current Status
 
@@ -171,7 +166,7 @@ The project builds and runs with:
 - Cross-platform workspace configuration (`rust-toolchain.toml`, `.cargo/config.toml` are platform-neutral; Windows-only flags are scoped to the Windows target)
 - FFmpeg dependency detection on startup
 - NVENC hardware acceleration detection with graceful fallback
-- `cargo test -p robs-ui -p robs-outputs` test suite (54 tests) passing on Windows and macOS
+- `cargo test --workspace` test suite (97 tests) passing on Windows and macOS
 
 ## Design Goals
 

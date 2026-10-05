@@ -2,7 +2,7 @@
 //!
 //! These describe devices, audio channels, and the event-log entry types, plus
 //! the cohesive engine state clusters. They are `pub`: they cross the crate
-//! boundary now, with the view layer (`robs-ui`) reading them through
+//! boundary now, with the view layer reading them through
 //! `RobsController`.
 
 #[derive(Clone)]
