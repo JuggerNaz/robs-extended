@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::canvas_glue::{ann_bbox, path_commands, tool_index, TEXT_FONT_SIZE};
+use crate::layout;
 use crate::{
     AnnotationView, Api, CanvasApi, CanvasTextView, DsRow, LogLineView, MainWindow, PanelsApi,
     SceneItemView,
@@ -30,22 +31,6 @@ const LOG_ROWS: usize = 100;
 
 /// Snapshot-toast display window (matches the old egui panel).
 const SNAPSHOT_FLASH: Duration = Duration::from_millis(1500);
-
-/// Shell layout constants — MUST mirror `ui/theme.slint`
-/// (`topbar-h`, `rail-w`, `right-w`, `actions-h`): the glue letterboxes the
-/// canvas from these and the markup places the regions with the same values.
-pub mod layout {
-    pub const TOPBAR_H: f32 = 40.0;
-    pub const RAIL_W: f32 = 260.0;
-    pub const RIGHT_W: f32 = 300.0;
-    pub const ACTIONS_H: f32 = 56.0;
-    /// Bottom data-string telemetry bar height — mirrors `ui/theme.slint`
-    /// (`data-h`).
-    pub const DATA_H: f32 = 60.0;
-    /// Scene selector bar above the canvas — mirrors `ui/theme.slint`
-    /// (`scenebar-h`).
-    pub const SCENEBAR_H: f32 = 44.0;
-}
 
 /// Handles to the models installed in `Api`, plus mirrors of the last pushed
 /// data for change detection. The two item models are owned as `ModelRc`

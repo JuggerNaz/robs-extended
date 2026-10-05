@@ -9,6 +9,7 @@
 //! shared behind `Rc<RefCell<..>>` — no locks.
 
 mod canvas_glue;
+mod layout;
 mod panels_glue;
 mod push;
 mod qid_glue;

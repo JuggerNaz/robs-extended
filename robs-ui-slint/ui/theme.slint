@@ -38,8 +38,9 @@ export global Theme {
     out property <length> font-lg: 17px;
     out property <length> font-xl: 22px;
 
-    // Shell layout. These constants are mirrored in `src/push.rs`
-    // (`layout` module) — keep the two in sync.
+    // Shell layout. The Rust source of truth for these values is
+    // `src/layout.rs`; Slint cannot import Rust constants, so the numbers
+    // are mirrored here by hand (a unit test in `layout.rs` pins them).
     out property <length> topbar-h: 40px;
     out property <length> rail-w: 260px;
     out property <length> right-w: 300px;
