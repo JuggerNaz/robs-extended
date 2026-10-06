@@ -29,17 +29,20 @@ pub mod devices;
 pub mod dxgi_capture;
 pub mod state;
 
-use crate::dxgi_capture::DxgiCaptureManager;
+use capture::PreviewService;
 use parking_lot::RwLock;
 use robs_chat::aggregator::ChatAggregator;
 use robs_chat::message::{ChatEvent, UnifiedChatMessage};
 use robs_core::traits::VideoSource;
 use robs_core::SceneCollection;
 use robs_encoding::detect_encoders;
-use state::{
-    AnnotationState, AnomalyState, BlackboxState, EditingState, EventLogEntry, EventLogKind,
-    OverlayState, PreviewState, RecordState, StreamState, TelemetryState,
-};
+use anomaly::AnomalyService;
+use blackbox::BlackboxService;
+use overlay::OverlayService;
+use record::RecordService;
+use state::{AnnotationState, EditingState, EventLogEntry, EventLogKind};
+use stream::StreamService;
+use telemetry::TelemetryService;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -76,13 +79,14 @@ pub struct RobsController {
     // Active video source (kept flat: a single transient box).
     #[allow(dead_code)]
     pub active_video_source: Option<Box<dyn VideoSource>>,
-    // Direct DXGI Desktop Duplication capture (GPU-accelerated), shared by
-    // preview and recording.
-    pub dxgi_manager: Option<DxgiCaptureManager>,
-    // Cohesive state clusters (definitions in `state.rs`).
-    pub record: RecordState,
-    pub stream: StreamState,
-    pub preview: PreviewState,
+    // Cohesive state clusters (definitions in `state.rs`). Services own
+    // their cluster; field access flows through `Deref`, so view code is
+    // unchanged. The preview service also owns the shared DXGI capture
+    // manager; the window-HWND and webcam-capture maps stay flat on the
+    // facade because the view layer mutates them in place.
+    pub record: RecordService,
+    pub stream: StreamService,
+    pub preview: PreviewService,
     pub annotation: AnnotationState,
     pub editing: EditingState,
     // Maps scene-item IDs to window handles (HWND) for window-capture sources.
@@ -100,17 +104,24 @@ pub struct RobsController {
     pub snapshot_flash: Option<std::time::Instant>,
     // Text overlays (persistent on-screen text baked into recordings).
     pub text_overlays: Vec<robs_core::TextOverlay>,
-    // Always-on background safety recorder.
-    pub blackbox: BlackboxState,
-    // User-toggled short-clip anomaly capture buffer.
-    pub anomaly: AnomalyState,
+    // Always-on background safety recorder. Service owning the
+    // `BlackboxState` cluster (field access flows through `Deref`).
+    pub blackbox: BlackboxService,
+    // User-toggled short-clip anomaly capture buffer. Service owning the
+    // `AnomalyState` cluster (field access flows through `Deref`).
+    pub anomaly: AnomalyService,
     // Serial data-string telemetry feed (ROV nav strings over a COM port).
-    pub telemetry: TelemetryState,
+    // Service owning the `TelemetryState` cluster (field access flows
+    // through `Deref`, so view code is unchanged).
+    pub telemetry: TelemetryService,
     // Scene overlays: the baked data-string boxes + the company logo.
-    pub overlay: OverlayState,
+    // Service owning the `OverlayState` cluster (field access flows through
+    // `Deref`, so view code is unchanged).
+    pub overlay: OverlayService,
     // QID rail: structure components from the inspection DB + click-marked
-    // recording time segments (see `qid.rs` / `db.rs`).
-    pub qid: qid::QidState,
+    // recording time segments (see `qid.rs` / `db.rs`). Service owning the
+    // `QidState` cluster (field access flows through `Deref`).
+    pub qid: qid::QidService,
 }
 
 impl RobsController {
@@ -207,51 +218,10 @@ impl RobsController {
             aac_available: detection.aac_available,
             ffmpeg_available: detection.ffmpeg_available,
             active_video_source: None,
-            // Direct DXGI Desktop Duplication capture
-            dxgi_manager: None, // Initialized lazily on first capture
             // Cohesive state clusters (see `state.rs`)
-            record: RecordState {
-                recording: false,
-                recording_paused: false,
-                recording_time: 0,
-                recording_start_time: None,
-                last_recording_path: String::new(),
-                session_dir: None,
-                recording_file_output: None,
-                ffmpeg_recording_handle: None,
-                recording_dxgi_thread: None,
-                recording_stop_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                recording_frame_sender: None,
-                recording_ffmpeg_stdin: None,
-                last_frame_time: None,
-                timer_last_tick: None,
-                frame_count: 0,
-                clip_marks: Vec::new(),
-                clip_mark_start: None,
-                clip_export_rx: None,
-                clip_export_pending: 0,
-                clip_marking_supported: false,
-            },
-            stream: StreamState {
-                ffmpeg_handle: None,
-                writer_thread: None,
-                stop_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                frame_sender: None,
-                timer_last_tick: None,
-                frame_count: 0,
-            },
-            preview: PreviewState {
-                preview_capture_active: false,
-                preview_frame_sender: None,
-                preview_frame_receiver: None,
-                preview_capture_handle: None,
-                preview_frame_count: 0,
-                last_preview_capture: std::time::Instant::now(),
-                frame_buffer: std::collections::HashMap::new(),
-                preview_frames: std::collections::HashMap::new(),
-                next_frame_version: 0,
-                last_output_frame: None,
-            },
+            record: RecordService::new(),
+            stream: StreamService::new(),
+            preview: PreviewService::new(),
             annotation: AnnotationState {
                 show_annotations: true,
                 annotations: Vec::new(),
@@ -283,51 +253,20 @@ impl RobsController {
             snapshot_seq: 0,
             snapshot_flash: None,
             text_overlays: Vec::new(),
-            blackbox: {
-                let (bus, rx) = robs_core::EventBus::new();
-                let mut settings = robs_profiles::settings::BlackboxSettings::default();
-                // Default the encoder to the best available hardware/software.
-                if detection.nvenc_available {
-                    settings.encoder = "h264_nvenc".into();
-                } else {
-                    settings.encoder = "libx264".into();
-                }
-                BlackboxState {
-                    enabled: settings.enabled,
-                    settings,
-                    engine: None,
-                    status: robs_core::event::BlackboxStatus::default(),
-                    event_tx: bus.tx(),
-                    event_rx: Some(rx),
-                    session_override: None,
-                }
-            },
-            anomaly: {
-                let (bus, rx) = robs_core::EventBus::new();
-                AnomalyState {
-                    enabled: false,
-                    // Persisted settings (config dir `settings.json`); defaults
-                    // on first run or an unreadable file.
-                    settings: robs_profiles::settings::AnomalySettings::load_or_default(),
-                    engine: None,
-                    status: robs_core::event::AnomalyStatus::default(),
-                    event_tx: bus.tx(),
-                    event_rx: Some(rx),
-                    session_override: None,
-                }
-            },
-            telemetry: TelemetryState::new(
+            blackbox: BlackboxService::new(detection.nvenc_available),
+            anomaly: AnomalyService::new(),
+            telemetry: TelemetryService::new(
                 robs_profiles::settings::SerialTelemetrySettings::load_or_default(),
             ),
-            overlay: OverlayState::default(),
+            overlay: OverlayService::default(),
             qid: {
                 let settings = robs_profiles::settings::DatabaseSettings::load_or_default();
                 let worker = settings
                     .is_configured()
                     .then(|| db::spawn(settings.clone()));
-                let mut state = qid::QidState::new(settings);
-                state.db = worker;
-                state
+                let mut service = qid::QidService::new(settings);
+                service.db = worker;
+                service
             },
         }
     }
@@ -394,9 +333,9 @@ impl RobsController {
 
         // Manage preview capture based on source visibility.
         if has_capture_source && !self.preview.preview_capture_active {
-            self.start_preview_capture();
+            self.preview.start_capture();
         } else if !has_capture_source && self.preview.preview_capture_active {
-            self.stop_preview_capture();
+            self.preview.stop_capture();
         }
 
         wake

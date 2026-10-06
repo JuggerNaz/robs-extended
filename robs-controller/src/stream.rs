@@ -6,7 +6,7 @@
 //! output-resolution BGRA frame (`capture.rs`) and sends it over an mpsc
 //! channel that a dedicated writer thread drains into FFmpeg's stdin.
 
-use super::state::EventLogKind;
+use super::state::{EventLogKind, StreamState};
 use super::RobsController;
 use std::process::Stdio;
 
@@ -27,32 +27,69 @@ fn build_rtmp_url(server: &str, key: &str) -> Result<String, String> {
     Ok(format!("{}/{}", server.trim_end_matches('/'), key))
 }
 
-impl RobsController {
-    pub fn start_streaming(&mut self) {
-        if self.streaming {
-            return;
-        }
+/// Facade-provided configuration for starting a stream. The streaming
+/// settings stay flat fields on `RobsController` (view-facing); they are
+/// passed in explicitly because the service owns only the pipeline state.
+pub(crate) struct StreamStartParams {
+    pub server: String,
+    pub key: String,
+    /// The selected encoder label (e.g. `"NVIDIA NVENC H.264 (Hardware)"`).
+    pub encoder_setting: String,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub fps: f32,
+    pub bitrate_kbps: u32,
+    pub keyframe_interval: u32,
+}
 
-        let url = match build_rtmp_url(&self.stream_server, &self.stream_key) {
+/// Service owning the streaming pipeline state cluster ([`StreamState`]):
+/// the FFmpeg child, its writer thread, the stop flag, and the frame
+/// channel. The `streaming` / `streaming_paused` / `streaming_time` view
+/// fields stay on the facade — the facade delegate keeps them in sync
+/// around `start`/`stop`.
+pub struct StreamService {
+    state: StreamState,
+}
+
+impl StreamService {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: StreamState {
+                ffmpeg_handle: None,
+                writer_thread: None,
+                stop_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                frame_sender: None,
+                timer_last_tick: None,
+                frame_count: 0,
+            },
+        }
+    }
+
+    /// Spawn the FFmpeg RTMP pipeline plus its frame-writer thread.
+    /// Returns `Err` carrying the complete event-log line on failure —
+    /// logging stays with the facade because the event log is facade state.
+    pub(crate) fn start(&mut self, params: &StreamStartParams) -> Result<(), String> {
+        let url = match build_rtmp_url(&params.server, &params.key) {
             Ok(url) => url,
             Err(reason) => {
-                self.log_event(
-                    format!("Stream not started: {reason} (Settings \u{2192} Streaming)"),
-                    EventLogKind::Stream,
-                );
-                return;
+                return Err(format!(
+                    "Stream not started: {reason} (Settings \u{2192} Streaming)"
+                ));
             }
         };
 
-        let encoder =
-            if self.video_encoder.contains("NVENC") || self.video_encoder.contains("NVIDIA") {
-                "h264_nvenc"
-            } else {
-                "libx264"
-            };
+        let encoder = if params
+            .encoder_setting
+            .contains("NVENC")
+            || params.encoder_setting.contains("NVIDIA")
+        {
+            "h264_nvenc"
+        } else {
+            "libx264"
+        };
 
-        let output_w = self.output_width;
-        let output_h = self.output_height;
+        let output_w = params.output_width;
+        let output_h = params.output_height;
 
         let mut args: Vec<String> = Vec::new();
 
@@ -62,7 +99,7 @@ impl RobsController {
         args.push("-video_size".into());
         args.push(format!("{}x{}", output_w, output_h));
         args.push("-framerate".into());
-        args.push(self.fps_setting.to_string());
+        args.push(params.fps.to_string());
         args.push("-i".into());
         args.push("pipe:0".into());
 
@@ -74,8 +111,8 @@ impl RobsController {
         args.push("yuv420p".into());
 
         // Streaming-tuned rate control: CBR is what live ingest wants.
-        let bitrate = self.stream_bitrate;
-        let gop = ((self.fps_setting * self.keyframe_interval as f32) as u32).max(1);
+        let bitrate = params.bitrate_kbps;
+        let gop = ((params.fps * params.keyframe_interval as f32) as u32).max(1);
         if encoder == "h264_nvenc" {
             args.extend(["-preset", "p4", "-tune", "ll", "-gpu", "0", "-rc", "cbr"].map(String::from));
         } else {
@@ -90,7 +127,7 @@ impl RobsController {
         args.push("-g".into());
         args.push(gop.to_string());
         args.push("-r".into());
-        args.push(self.fps_setting.to_string());
+        args.push(params.fps.to_string());
 
         // Output: FLV over RTMP.
         args.push("-f".into());
@@ -109,8 +146,7 @@ impl RobsController {
         let mut child = match spawn {
             Ok(child) => child,
             Err(e) => {
-                self.log_event(format!("Stream failed to start: {e}"), EventLogKind::Stream);
-                return;
+                return Err(format!("Stream failed to start: {e}"));
             }
         };
 
@@ -132,7 +168,7 @@ impl RobsController {
         // Writer thread: drain the frame channel into FFmpeg stdin (identical
         // to the recording writer; stdin EOF on exit lets FFmpeg finalize).
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let stop_flag = self.stream.stop_flag.clone();
+        let stop_flag = self.stop_flag.clone();
         let stdin = child
             .stdin
             .take()
@@ -159,37 +195,29 @@ impl RobsController {
             eprintln!("[Stream] Writer thread exiting after {frame_count} frames");
         });
 
-        self.stream.ffmpeg_handle = Some(child);
-        self.stream.writer_thread = Some(writer);
-        self.stream.frame_sender = Some(tx);
-        self.stream.frame_count = 0;
+        self.ffmpeg_handle = Some(child);
+        self.writer_thread = Some(writer);
+        self.frame_sender = Some(tx);
+        self.frame_count = 0;
 
-        self.streaming = true;
-        self.streaming_paused = false;
-        self.streaming_time = 0;
-        self.bitrate = self.stream_bitrate;
-
-        let host = self.stream_server.trim_start_matches("rtmp://").to_string();
-        self.log_event(
-            format!("Streaming started \u{2192} {} ({})", host, self.stream_service),
-            EventLogKind::Stream,
-        );
+        Ok(())
     }
 
-    pub fn stop_streaming(&mut self) {
+    /// Tear down the pipeline: 1. signal the writer thread, 2. close the
+    /// channel, 3. join the writer (dropping FFmpeg stdin = EOF), 4. reap
+    /// the child, then reset for the next session. The flat view fields
+    /// (`streaming` etc.) stay with the facade delegate.
+    pub(crate) fn stop(&mut self) {
         eprintln!("[Stream] Stopping stream...");
 
-        // 1. Signal the writer thread, 2. close the channel, 3. join the
-        // writer (dropping FFmpeg stdin = EOF), 4. reap the child.
-        self.stream
-            .stop_flag
+        self.stop_flag
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.stream.frame_sender = None;
-        if let Some(handle) = self.stream.writer_thread.take() {
+        self.frame_sender = None;
+        if let Some(handle) = self.writer_thread.take() {
             let _ = handle.join();
         }
 
-        if let Some(mut child) = self.stream.ffmpeg_handle.take() {
+        if let Some(mut child) = self.ffmpeg_handle.take() {
             let timeout = std::time::Duration::from_secs(10);
             let start = std::time::Instant::now();
             loop {
@@ -218,14 +246,66 @@ impl RobsController {
         }
 
         // Reset for the next session.
-        self.stream.stop_flag =
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.stream.writer_thread = None;
-        self.stream.frame_sender = None;
-        self.stream.ffmpeg_handle = None;
+        self.stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.writer_thread = None;
+        self.frame_sender = None;
+        self.ffmpeg_handle = None;
+    }
+}
+
+impl std::ops::Deref for StreamService {
+    type Target = StreamState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for StreamService {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+impl RobsController {
+    pub fn start_streaming(&mut self) {
+        if self.streaming {
+            return;
+        }
+
+        let params = StreamStartParams {
+            server: self.stream_server.clone(),
+            key: self.stream_key.clone(),
+            encoder_setting: self.video_encoder.clone(),
+            output_width: self.output_width,
+            output_height: self.output_height,
+            fps: self.fps_setting,
+            bitrate_kbps: self.stream_bitrate,
+            keyframe_interval: self.keyframe_interval,
+        };
+        match self.stream.start(&params) {
+            Ok(()) => {
+                self.streaming = true;
+                self.streaming_paused = false;
+                self.streaming_time = 0;
+                self.bitrate = self.stream_bitrate;
+
+                let host = self.stream_server.trim_start_matches("rtmp://").to_string();
+                self.log_event(
+                    format!("Streaming started \u{2192} {} ({})", host, self.stream_service),
+                    EventLogKind::Stream,
+                );
+            }
+            Err(message) => self.log_event(message, EventLogKind::Stream),
+        }
+    }
+
+    pub fn stop_streaming(&mut self) {
+        eprintln!("[Stream] Stopping stream...");
 
         let was_streaming = self.streaming;
         let elapsed = self.streaming_time / 1000; // ms → s
+        self.stream.stop();
         self.streaming = false;
         self.streaming_paused = false;
         self.streaming_time = 0;

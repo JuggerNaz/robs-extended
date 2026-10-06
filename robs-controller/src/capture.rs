@@ -1,36 +1,73 @@
 //! Desktop/window/webcam preview capture and frame delivery to the recording
 //! pipeline.
+//!
+//! [`PreviewService`] owns the live preview-capture cluster ([`PreviewState`])
+//! plus the shared DXGI desktop-duplication manager. The [`RobsController`]
+//! impl below keeps the per-tick frame tap (`process_preview_frames`): it
+//! captures each scene item's source via the service, feeds the blackbox /
+//! anomaly engines their raw BGRA copies, composes the output frame ONCE, and
+//! hands it to the four consumers — recording stdin, stream stdin, the
+//! snapshot hook, and the duplicate-frame reservoir.
 
 use super::RobsController;
 use crate::dxgi_capture::DxgiCaptureManager;
-use crate::state::PreviewFrame;
+use crate::state::{PreviewFrame, PreviewState};
 use robs_core::scene::CaptureSource;
 use robs_core::types::SceneItemId;
 
-impl RobsController {
-    pub(crate) fn start_preview_capture(&mut self) {
-        if self.preview.preview_capture_active {
+/// Service owning the live preview-capture state ([`PreviewState`]) and the
+/// lazily-initialized DXGI capture manager shared by preview and recording.
+/// The window-HWND and webcam-capture maps stay on the facade (the view
+/// layer mutates them in place), as do the snapshot fields.
+pub struct PreviewService {
+    state: PreviewState,
+    /// Direct DXGI Desktop Duplication capture (GPU-accelerated).
+    /// Initialized lazily on first capture.
+    dxgi_manager: Option<DxgiCaptureManager>,
+}
+
+impl PreviewService {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: PreviewState {
+                preview_capture_active: false,
+                preview_frame_sender: None,
+                preview_frame_receiver: None,
+                preview_capture_handle: None,
+                preview_frame_count: 0,
+                last_preview_capture: std::time::Instant::now(),
+                frame_buffer: std::collections::HashMap::new(),
+                preview_frames: std::collections::HashMap::new(),
+                next_frame_version: 0,
+                last_output_frame: None,
+            },
+            dxgi_manager: None,
+        }
+    }
+
+    pub(crate) fn start_capture(&mut self) {
+        if self.state.preview_capture_active {
             return;
         }
 
         // For now, just mark as active - actual capture will use recording pipeline
         // This is a placeholder until we can integrate with the video pipeline properly
-        self.preview.preview_capture_active = true;
+        self.state.preview_capture_active = true;
         eprintln!("[Preview] Preview capture requested (using recording pipeline)");
     }
 
-    pub(crate) fn stop_preview_capture(&mut self) {
-        if !self.preview.preview_capture_active {
+    pub(crate) fn stop_capture(&mut self) {
+        if !self.state.preview_capture_active {
             return;
         }
 
-        self.preview.preview_capture_active = false;
+        self.state.preview_capture_active = false;
         eprintln!("[Preview] Preview capture stopped");
     }
 
     /// Capture a specific monitor using our direct DXGI implementation
     /// position: (x, y) coordinates in virtual screen space - the authoritative monitor identifier
-    fn capture_desktop_frame(&mut self, position: (i32, i32)) -> Option<(Vec<u8>, u32, u32)> {
+    pub(crate) fn capture_desktop_frame(&mut self, position: (i32, i32)) -> Option<(Vec<u8>, u32, u32)> {
         // Initialize DXGI manager if needed
         if self.dxgi_manager.is_none() {
             eprintln!("[DXGI] Initializing direct DXGI capture manager...");
@@ -68,7 +105,76 @@ impl RobsController {
             .ok()
             .map(|frame| (frame.data, frame.width, frame.height))
     }
+}
 
+impl std::ops::Deref for PreviewService {
+    type Target = PreviewState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for PreviewService {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+/// Scale captured frame to output resolution (OBS-style: preview matches output)
+fn scale_frame_to_output(
+    data: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Vec<u8> {
+    use image::{ImageBuffer, Rgba};
+
+    // If dimensions match, return original
+    if src_width == dst_width && src_height == dst_height {
+        return data.to_vec();
+    }
+
+    // Convert BGRA to RGBA for image crate
+    let mut rgba_data = data.to_vec();
+    for chunk in rgba_data.chunks_exact_mut(4) {
+        chunk.swap(0, 2); // BGRA -> RGBA
+    }
+
+    // Create source image
+    let src_img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        match ImageBuffer::from_raw(src_width, src_height, rgba_data) {
+            Some(img) => img,
+            None => {
+                eprintln!(
+                    "[Scale] Failed to create {}x{} image ({} bytes)",
+                    src_width,
+                    src_height,
+                    data.len()
+                );
+                return data.to_vec();
+            }
+        };
+
+    // Resize to output resolution using bilinear filtering
+    let dst_img = image::imageops::resize(
+        &src_img,
+        dst_width,
+        dst_height,
+        image::imageops::FilterType::Triangle,
+    );
+
+    // Convert back to BGRA
+    let mut output = dst_img.into_raw();
+    for chunk in output.chunks_exact_mut(4) {
+        chunk.swap(0, 2); // RGBA -> BGRA
+    }
+
+    output
+}
+
+impl RobsController {
     /// True when at least one frame interval has passed since the last frame
     /// handed to an encoder; updates the pacer timestamp when due. Shared by
     /// the fresh-compose path and the duplicate-resend path so exactly one
@@ -79,12 +185,13 @@ impl RobsController {
 
     /// Compose the shared output frame for whichever encoders are active
     /// (recording and/or streaming). This reuses the preview capture frame -
-    /// no double capture needed - and exists so both consumers get the SAME
+    /// no double capture needed - and exists so all consumers get the SAME
     /// composed frame instead of scaling/annotating twice per tick.
     ///
     /// Rate-limits to the target FPS, scales to the output resolution, bakes
-    /// annotations/overlays, handles the snapshot hook, and converts RGBA→BGRA
-    /// for FFmpeg. Returns `None` when the rate limiter skipped this frame.
+    /// annotations/overlays, and converts RGBA→BGRA for FFmpeg. Returns
+    /// `None` when the rate limiter skipped this frame. The snapshot hook is
+    /// a consumer of the returned frame (see `process_preview_frames`).
     fn compose_output_frame(
         &mut self,
         rgba_data: &[u8],
@@ -102,7 +209,7 @@ impl RobsController {
         // Scale on main thread BEFORE sending to reduce memory pressure
         // 4K (33MB) → 1080p (8.3MB) = 75% reduction per frame
         let scaled_data = if width != out_w || height != out_h {
-            self.scale_frame_to_output(rgba_data, width, height, out_w, out_h)
+            scale_frame_to_output(rgba_data, width, height, out_w, out_h)
         } else {
             rgba_data.to_vec()
         };
@@ -188,18 +295,6 @@ impl RobsController {
         let mut bgra_data = scaled_data;
         for chunk in bgra_data.chunks_exact_mut(4) {
             chunk.swap(0, 2); // RGBA -> BGRA
-        }
-
-        // Snapshot: capture the exact frame that is being encoded (scaled to
-        // output resolution, annotations baked in). `bgra_data` is BGRA; the
-        // PNG path wants RGBA, so swap channels on a clone.
-        if self.take_snapshot {
-            let mut snap = bgra_data.clone();
-            for chunk in snap.chunks_exact_mut(4) {
-                chunk.swap(0, 2); // BGRA -> RGBA
-            }
-            self.save_snapshot(&snap, out_w, out_h);
-            self.take_snapshot = false;
         }
 
         // Remember so a later tick with no fresh frame can duplicate it.
@@ -345,7 +440,7 @@ impl RobsController {
                             label, x, y, width, height
                         );
                         // Pure DX11 capture - no GDI fallback
-                        let grabbed = self.capture_desktop_frame((*x, *y));
+                        let grabbed = self.preview.capture_desktop_frame((*x, *y));
                         slot.insert(grabbed.clone());
                         grabbed
                     }
@@ -393,10 +488,11 @@ impl RobsController {
 
                 // RECORDING / STREAMING: reuse the captured frame (no double
                 // capture - both encoders tap into the same frame preview
-                // uses). Compose once, then hand a copy to each active
-                // encoder so running both at once does not double the
-                // scale/annotation work per tick. Gated to the current scene:
-                // background scenes refresh textures only.
+                // uses). Compose ONCE, then hand the one composed frame to
+                // every consumer — recording stdin, stream stdin, and the
+                // snapshot hook — so running them together does not multiply
+                // the scale/annotation work per tick. Gated to the current
+                // scene: background scenes refresh textures only.
                 let recording_active = self.record.recording
                     && !self.record.recording_paused
                     && self.record.recording_frame_sender.is_some();
@@ -404,6 +500,20 @@ impl RobsController {
                     self.streaming && !self.streaming_paused && self.stream.frame_sender.is_some();
                 if *is_current && (recording_active || streaming_active) {
                     if let Some(bgra) = self.compose_output_frame(&rgba_data, width, height) {
+                        // Snapshot consumer: capture the exact frame that is
+                        // being encoded (scaled to output resolution,
+                        // annotations baked in). `bgra` is BGRA; the PNG path
+                        // wants RGBA, so swap channels on a clone.
+                        if self.take_snapshot {
+                            let out_w = self.output_width;
+                            let out_h = self.output_height;
+                            let mut snap = bgra.clone();
+                            for chunk in snap.chunks_exact_mut(4) {
+                                chunk.swap(0, 2); // BGRA -> RGBA
+                            }
+                            self.save_snapshot(&snap, out_w, out_h);
+                            self.take_snapshot = false;
+                        }
                         if recording_active {
                             if let Some(tx) = &self.record.recording_frame_sender {
                                 match tx.send(bgra.clone()) {
@@ -466,60 +576,6 @@ impl RobsController {
         // encoders' constant-framerate stream stays wall-clock paced. A
         // no-op when fresh frames were sent (the pacer is not due).
         self.resend_last_output_frame();
-    }
-
-    /// Scale captured frame to output resolution (OBS-style: preview matches output)
-    fn scale_frame_to_output(
-        &self,
-        data: &[u8],
-        src_width: u32,
-        src_height: u32,
-        dst_width: u32,
-        dst_height: u32,
-    ) -> Vec<u8> {
-        use image::{ImageBuffer, Rgba};
-
-        // If dimensions match, return original
-        if src_width == dst_width && src_height == dst_height {
-            return data.to_vec();
-        }
-
-        // Convert BGRA to RGBA for image crate
-        let mut rgba_data = data.to_vec();
-        for chunk in rgba_data.chunks_exact_mut(4) {
-            chunk.swap(0, 2); // BGRA -> RGBA
-        }
-
-        // Create source image
-        let src_img: ImageBuffer<Rgba<u8>, Vec<u8>> =
-            match ImageBuffer::from_raw(src_width, src_height, rgba_data) {
-                Some(img) => img,
-                None => {
-                    eprintln!(
-                        "[Scale] Failed to create {}x{} image ({} bytes)",
-                        src_width,
-                        src_height,
-                        data.len()
-                    );
-                    return data.to_vec();
-                }
-            };
-
-        // Resize to output resolution using bilinear filtering
-        let dst_img = image::imageops::resize(
-            &src_img,
-            dst_width,
-            dst_height,
-            image::imageops::FilterType::Triangle,
-        );
-
-        // Convert back to BGRA
-        let mut output = dst_img.into_raw();
-        for chunk in output.chunks_exact_mut(4) {
-            chunk.swap(0, 2); // RGBA -> BGRA
-        }
-
-        output
     }
 }
 

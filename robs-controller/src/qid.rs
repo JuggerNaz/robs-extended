@@ -210,35 +210,261 @@ pub fn write_sidecar(
     Ok(path)
 }
 
-/// Current segment anchors from the controller's recording clock.
-fn now_anchor(controller: &RobsController) -> SegmentAnchor {
-    SegmentAnchor {
-        wall: chrono::Utc::now(),
-        elapsed_ms: controller.record.recording_time,
-        frame: controller.record.frame_count,
+/// Service owning the QID-rail state cluster ([`QidState`]): the component
+/// list, the open/closed segments, and the DB worker handle. Cross-service
+/// reads (the recording clock anchors and the recording path) are explicit
+/// parameters; event-log lines are returned to the facade in order.
+pub struct QidService {
+    state: QidState,
+}
+
+impl QidService {
+    pub fn new(settings: DatabaseSettings) -> Self {
+        Self {
+            state: QidState::new(settings),
+        }
+    }
+
+    /// Request a fresh QID list from the database. Returns the event-log
+    /// line when the database is unconfigured (the caller logs it).
+    pub fn refresh_qids(&mut self) -> Option<String> {
+        let Some(db) = &self.db else {
+            return Some(
+                "QID database not configured — set database.url (and optionally structure_id, 0 = all) in settings.json"
+                    .to_string(),
+            );
+        };
+        // `structure_id == 0` means "all structures" (see `DatabaseSettings`).
+        let structure_id = (self.settings.structure_id > 0).then_some(self.settings.structure_id);
+        if db
+            .tx
+            .send(super::db::DbCommand::LoadComponents { structure_id })
+            .is_ok()
+        {
+            self.status = "LOADING".into();
+            self.status_state = 0;
+        }
+        None
+    }
+
+    /// QID rail click: close the open segment and open a new one for the
+    /// clicked QID. Returns the event-log lines in order. The recording
+    /// guard stays with the facade — idle clicks never reach this method.
+    pub fn select(
+        &mut self,
+        component_id: i64,
+        anchor: SegmentAnchor,
+        recording_path: &str,
+    ) -> Vec<(String, EventLogKind)> {
+        let Some(component) = self
+            .components
+            .iter()
+            .find(|c| c.id == component_id)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+
+        let mut logs: Vec<(String, EventLogKind)> = Vec::new();
+        let mut closed: Option<QidSegment> = None;
+        match apply_qid_select(self.open.as_ref(), component.clone(), anchor, recording_path) {
+            QidSelectAction::SameQid => return logs,
+            QidSelectAction::Opened(c) => {
+                self.open = Some(OpenSegment { component: c, start: anchor });
+                logs.push((
+                    format!(
+                        "QID marking started: {} at {}",
+                        component.q_id,
+                        crate::RobsController::format_time((anchor.elapsed_ms / 1000) as u64)
+                    ),
+                    EventLogKind::Record,
+                ));
+            }
+            QidSelectAction::Switched { closed: seg, opened } => {
+                logs.push((
+                    format!(
+                        "QID changed: {} (segment {} \u{2013} {})",
+                        opened.q_id,
+                        crate::RobsController::format_time((seg.elapsed_start_ms / 1000) as u64),
+                        crate::RobsController::format_time((seg.elapsed_end_ms / 1000) as u64),
+                    ),
+                    EventLogKind::Record,
+                ));
+                self.open = Some(OpenSegment {
+                    component: opened,
+                    start: anchor,
+                });
+                closed = Some(seg);
+            }
+        }
+        // The CURRENT QID panel and row highlight follow the open segment.
+        self.current = Some(component);
+        if let Some(seg) = closed {
+            self.segments.push(seg);
+            self.append_sidecar(recording_path);
+        }
+        logs
+    }
+
+    /// Open a segment for the already-selected QID at recording start (the
+    /// selection persists from the previous session). Called from
+    /// `start_recording` after the session state resets.
+    pub fn start_session(&mut self, anchor: SegmentAnchor) {
+        self.segments.clear();
+        self.open = self.current.clone().map(|component| OpenSegment {
+            component,
+            start: anchor,
+        });
+    }
+
+    /// Auto-close the open segment at the final recording anchors, write
+    /// the sidecar JSON, and hand all segments to the DB worker. Called
+    /// from `stop_recording` BEFORE the elapsed-time reset. Returns the
+    /// event-log lines in order.
+    pub fn stop_session(
+        &mut self,
+        anchor: SegmentAnchor,
+        recording_path: &str,
+    ) -> Vec<(String, EventLogKind)> {
+        if let Some(open) = self.open.take() {
+            self.segments.push(close_segment(&open, anchor, recording_path));
+        }
+        let segments = std::mem::take(&mut self.segments);
+        let mut logs: Vec<(String, EventLogKind)> = Vec::new();
+        if segments.is_empty() {
+            return logs;
+        }
+        // Sidecar first: it is the crash-safe copy regardless of DB state.
+        match write_sidecar(&segments[0].recording_path, &segments) {
+            Ok(path) => logs.push((
+                format!(
+                    "{} QID segment(s) written to {}",
+                    segments.len(),
+                    path.display()
+                ),
+                EventLogKind::Record,
+            )),
+            Err(e) => logs.push((
+                format!("QID sidecar write failed: {e}"),
+                EventLogKind::Info,
+            )),
+        }
+        if self.settings.is_configured() {
+            if let Some(db) = &self.db {
+                if db
+                    .tx
+                    .send(super::db::DbCommand::InsertSegments { segments })
+                    .is_ok()
+                {
+                    self.status = "SAVING".into();
+                    self.status_state = 0;
+                }
+            }
+        }
+        logs
+    }
+
+    /// Drain DB worker results: apply the component list / surface errors.
+    /// Returns the event-log lines in order plus a `true` busy flag while a
+    /// load or save is still in flight (the caller keeps ticking so the
+    /// result surfaces promptly).
+    pub fn drain_db_events(&mut self) -> (bool, Vec<(String, EventLogKind)>) {
+        let results: Vec<super::db::DbResult> = {
+            let Some(db) = &self.db else {
+                return (false, Vec::new());
+            };
+            let mut out = Vec::new();
+            while let Ok(result) = db.rx.try_recv() {
+                out.push(result);
+            }
+            out
+        };
+        let mut logs: Vec<(String, EventLogKind)> = Vec::new();
+        for result in results {
+            match result {
+                super::db::DbResult::Components(list) => {
+                    let count = list.len();
+                    self.components = list;
+                    // Drop a selection that no longer exists.
+                    if let Some(cur) = &self.current {
+                        if !self.components.iter().any(|c| c.id == cur.id) {
+                            self.current = None;
+                        }
+                    }
+                    self.status = "ONLINE".into();
+                    self.status_state = 1;
+                    self.last_error = None;
+                    logs.push((
+                        format!("QID list loaded ({count} components)"),
+                        EventLogKind::Info,
+                    ));
+                }
+                super::db::DbResult::ComponentsFailed(error) => {
+                    self.status = "ERROR".into();
+                    self.status_state = 2;
+                    self.last_error = Some(error.clone());
+                    logs.push((format!("QID load failed: {error}"), EventLogKind::Info));
+                }
+                super::db::DbResult::SegmentsInserted { count } => {
+                    self.status = "ONLINE".into();
+                    self.status_state = 1;
+                    logs.push((
+                        format!("{count} QID segment(s) saved to database"),
+                        EventLogKind::Record,
+                    ));
+                }
+                super::db::DbResult::SegmentsFailed { error, segments } => {
+                    self.status = "ERROR".into();
+                    self.status_state = 2;
+                    self.last_error = Some(error.clone());
+                    let sidecar = segments
+                        .first()
+                        .and_then(|s| sidecar_path(&s.recording_path))
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    logs.push((
+                        format!(
+                            "QID segment insert failed: {error} \u{2014} sidecar copy at {sidecar}"
+                        ),
+                        EventLogKind::Info,
+                    ));
+                }
+            }
+        }
+        (self.status == "LOADING" || self.status == "SAVING", logs)
+    }
+
+    /// Append the already-closed segments to the sidecar (called per QID
+    /// switch so a crash mid-recording keeps every closed span).
+    fn append_sidecar(&mut self, recording_path: &str) {
+        if self.segments.is_empty() {
+            return;
+        }
+        if let Err(e) = write_sidecar(recording_path, &self.segments) {
+            eprintln!("[QID] sidecar append failed: {e}");
+        }
+    }
+}
+
+impl std::ops::Deref for QidService {
+    type Target = QidState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for QidService {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
     }
 }
 
 impl RobsController {
     /// Request a fresh QID list from the database (no-op when unconfigured).
     pub fn refresh_qids(&mut self) {
-        let Some(db) = &self.qid.db else {
-            self.log_event(
-                "QID database not configured — set database.url (and optionally structure_id, 0 = all) in settings.json",
-                EventLogKind::Info,
-            );
-            return;
-        };
-        // `structure_id == 0` means "all structures" (see `DatabaseSettings`).
-        let structure_id =
-            (self.qid.settings.structure_id > 0).then_some(self.qid.settings.structure_id);
-        if db
-            .tx
-            .send(super::db::DbCommand::LoadComponents { structure_id })
-            .is_ok()
-        {
-            self.qid.status = "LOADING".into();
-            self.qid.status_state = 0;
+        if let Some(message) = self.qid.refresh_qids() {
+            self.log_event(message, EventLogKind::Info);
         }
     }
 
@@ -250,185 +476,49 @@ impl RobsController {
         if !self.record.recording {
             return;
         }
-        let Some(component) = self
-            .qid
-            .components
-            .iter()
-            .find(|c| c.id == component_id)
-            .cloned()
-        else {
-            return;
-        };
-
-        let anchors = now_anchor(self);
+        let anchor = self.now_anchor();
         let path = self.record.last_recording_path.clone();
-        let mut closed: Option<QidSegment> = None;
-        match apply_qid_select(self.qid.open.as_ref(), component.clone(), anchors, &path) {
-            QidSelectAction::SameQid => return,
-            QidSelectAction::Opened(c) => {
-                self.qid.open = Some(OpenSegment { component: c, start: anchors });
-                self.log_event(
-                    format!(
-                        "QID marking started: {} at {}",
-                        component.q_id,
-                        Self::format_time((anchors.elapsed_ms / 1000) as u64)
-                    ),
-                    EventLogKind::Record,
-                );
-            }
-            QidSelectAction::Switched { closed: seg, opened } => {
-                self.log_event(
-                    format!(
-                        "QID changed: {} (segment {} \u{2013} {})",
-                        opened.q_id,
-                        Self::format_time((seg.elapsed_start_ms / 1000) as u64),
-                        Self::format_time((seg.elapsed_end_ms / 1000) as u64),
-                    ),
-                    EventLogKind::Record,
-                );
-                self.qid.open = Some(OpenSegment {
-                    component: opened,
-                    start: anchors,
-                });
-                closed = Some(seg);
-            }
-        }
-        // The CURRENT QID panel and row highlight follow the open segment.
-        self.qid.current = Some(component);
-        if let Some(seg) = closed {
-            self.qid.segments.push(seg);
-            self.append_qid_sidecar();
+        for (message, kind) in self.qid.select(component_id, anchor, &path) {
+            self.log_event(message, kind);
         }
     }
 
-    /// Open a segment for the already-selected QID at recording start (the
-    /// selection persists from the previous session). Called from
-    /// `start_recording` after the session state resets.
+    /// Current segment anchors from the recording clock (elapsed
+    /// milliseconds exclude paused spans; the frame count is the file
+    /// position — see the module docs).
+    fn now_anchor(&self) -> SegmentAnchor {
+        SegmentAnchor {
+            wall: chrono::Utc::now(),
+            elapsed_ms: self.record.recording_time,
+            frame: self.record.frame_count,
+        }
+    }
+
+    /// Open a segment for the already-selected QID at recording start.
     pub(crate) fn start_qid_session(&mut self) {
-        self.qid.segments.clear();
-        self.qid.open = self.qid.current.clone().map(|component| OpenSegment {
-            component,
-            start: now_anchor(self),
-        });
+        self.qid.start_session(self.now_anchor());
     }
 
     /// Auto-close the open segment at the final recording anchors, write
     /// the sidecar JSON, and hand all segments to the DB worker. Called
     /// from `stop_recording` BEFORE the elapsed-time reset.
     pub(crate) fn stop_qid_session(&mut self) {
-        if let Some(open) = self.qid.open.take() {
-            let anchors = now_anchor(self);
-            let path = self.record.last_recording_path.clone();
-            self.qid.segments.push(close_segment(&open, anchors, &path));
-        }
-        let segments = std::mem::take(&mut self.qid.segments);
-        if segments.is_empty() {
-            return;
-        }
-        // Sidecar first: it is the crash-safe copy regardless of DB state.
-        match write_sidecar(&segments[0].recording_path, &segments) {
-            Ok(path) => self.log_event(
-                format!(
-                    "{} QID segment(s) written to {}",
-                    segments.len(),
-                    path.display()
-                ),
-                EventLogKind::Record,
-            ),
-            Err(e) => self.log_event(format!("QID sidecar write failed: {e}"), EventLogKind::Info),
-        }
-        if self.qid.settings.is_configured() {
-            if let Some(db) = &self.qid.db {
-                if db
-                    .tx
-                    .send(super::db::DbCommand::InsertSegments { segments })
-                    .is_ok()
-                {
-                    self.qid.status = "SAVING".into();
-                    self.qid.status_state = 0;
-                }
-            }
-        }
-    }
-
-    /// Append the already-closed segments to the sidecar (called per QID
-    /// switch so a crash mid-recording keeps every closed span).
-    fn append_qid_sidecar(&mut self) {
-        if self.qid.segments.is_empty() {
-            return;
-        }
+        let anchor = self.now_anchor();
         let path = self.record.last_recording_path.clone();
-        if let Err(e) = write_sidecar(&path, &self.qid.segments) {
-            eprintln!("[QID] sidecar append failed: {e}");
+        for (message, kind) in self.qid.stop_session(anchor, &path) {
+            self.log_event(message, kind);
         }
     }
 
-    /// Drain DB worker results: apply the component list / surface errors.
-    /// Returns `true` while a load or save is still in flight (the caller
-    /// keeps ticking so the result surfaces promptly).
+    /// Drain DB worker results; returns `true` while a load or save is
+    /// still in flight (the caller keeps ticking so the result surfaces
+    /// promptly).
     pub(crate) fn drain_qid_db_events(&mut self) -> bool {
-        let results: Vec<super::db::DbResult> = {
-            let Some(db) = &self.qid.db else {
-                return false;
-            };
-            let mut out = Vec::new();
-            while let Ok(result) = db.rx.try_recv() {
-                out.push(result);
-            }
-            out
-        };
-        for result in results {
-            match result {
-                super::db::DbResult::Components(list) => {
-                    let count = list.len();
-                    self.qid.components = list;
-                    // Drop a selection that no longer exists.
-                    if let Some(cur) = &self.qid.current {
-                        if !self.qid.components.iter().any(|c| c.id == cur.id) {
-                            self.qid.current = None;
-                        }
-                    }
-                    self.qid.status = "ONLINE".into();
-                    self.qid.status_state = 1;
-                    self.qid.last_error = None;
-                    self.log_event(
-                        format!("QID list loaded ({count} components)"),
-                        EventLogKind::Info,
-                    );
-                }
-                super::db::DbResult::ComponentsFailed(error) => {
-                    self.qid.status = "ERROR".into();
-                    self.qid.status_state = 2;
-                    self.qid.last_error = Some(error.clone());
-                    self.log_event(format!("QID load failed: {error}"), EventLogKind::Info);
-                }
-                super::db::DbResult::SegmentsInserted { count } => {
-                    self.qid.status = "ONLINE".into();
-                    self.qid.status_state = 1;
-                    self.log_event(
-                        format!("{count} QID segment(s) saved to database"),
-                        EventLogKind::Record,
-                    );
-                }
-                super::db::DbResult::SegmentsFailed { error, segments } => {
-                    self.qid.status = "ERROR".into();
-                    self.qid.status_state = 2;
-                    self.qid.last_error = Some(error.clone());
-                    let sidecar = segments
-                        .first()
-                        .and_then(|s| sidecar_path(&s.recording_path))
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default();
-                    self.log_event(
-                        format!(
-                            "QID segment insert failed: {error} \u{2014} sidecar copy at {sidecar}"
-                        ),
-                        EventLogKind::Info,
-                    );
-                }
-            }
+        let (busy, logs) = self.qid.drain_db_events();
+        for (message, kind) in logs {
+            self.log_event(message, kind);
         }
-        self.qid.status == "LOADING" || self.qid.status == "SAVING"
+        busy
     }
 }
 

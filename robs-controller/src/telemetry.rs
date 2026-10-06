@@ -24,7 +24,7 @@ use chrono::{DateTime, Local};
 use parking_lot::RwLock;
 use robs_profiles::settings::SerialTelemetrySettings;
 
-use crate::RobsController;
+use crate::state::TelemetryState;
 
 /// Latest parsed record plus connection health, published by the reader
 /// thread and read by the UI tick.
@@ -290,32 +290,72 @@ fn replay_file(path: &str, stop: &AtomicBool, snapshot: &RwLock<TelemetrySnapsho
     }
 }
 
-impl RobsController {
+/// Service owning the telemetry state cluster ([`TelemetryState`]) and the
+/// reader-thread lifecycle. The view layer reaches the cluster's fields
+/// through the `Deref` impls (`controller.telemetry.settings …`), so no
+/// glue call sites change.
+pub struct TelemetryService {
+    state: TelemetryState,
+}
+
+impl TelemetryService {
+    pub fn new(settings: SerialTelemetrySettings) -> Self {
+        Self {
+            state: TelemetryState::new(settings),
+        }
+    }
+
     /// (Re)start the telemetry reader with the current settings.
     pub fn start_telemetry(&mut self) {
         self.stop_telemetry_inner();
-        let settings = self.telemetry.settings.clone();
-        let snapshot = Arc::clone(&self.telemetry.snapshot);
+        let settings = self.settings.clone();
+        let snapshot = Arc::clone(&self.snapshot);
         let stop = Arc::new(AtomicBool::new(false));
-        self.telemetry.stop_flag = Some(Arc::clone(&stop));
-        self.telemetry.reader = Some(spawn_reader(settings, stop, snapshot));
-        self.telemetry.running = true;
+        self.stop_flag = Some(Arc::clone(&stop));
+        self.reader = Some(spawn_reader(settings, stop, snapshot));
+        self.running = true;
     }
 
     /// Stop the telemetry reader (and clear the live indicator immediately).
     pub fn stop_telemetry(&mut self) {
         self.stop_telemetry_inner();
-        self.telemetry.running = false;
-        self.telemetry.snapshot.write().port_open = false;
+        self.running = false;
+        self.snapshot.write().port_open = false;
     }
 
     fn stop_telemetry_inner(&mut self) {
-        if let Some(flag) = self.telemetry.stop_flag.take() {
+        if let Some(flag) = self.stop_flag.take() {
             flag.store(true, Ordering::SeqCst);
         }
-        if let Some(handle) = self.telemetry.reader.take() {
+        if let Some(handle) = self.reader.take() {
             let _ = handle.join();
         }
+    }
+}
+
+impl std::ops::Deref for TelemetryService {
+    type Target = TelemetryState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for TelemetryService {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+impl crate::RobsController {
+    /// (Re)start the telemetry reader with the current settings.
+    pub fn start_telemetry(&mut self) {
+        self.telemetry.start_telemetry();
+    }
+
+    /// Stop the telemetry reader (and clear the live indicator immediately).
+    pub fn stop_telemetry(&mut self) {
+        self.telemetry.stop_telemetry();
     }
 }
 
