@@ -58,33 +58,39 @@ fn main() {
     let (chat_tx, chat_rx) = mpsc::channel(1000);
     let chat_aggregator = Arc::new(ChatAggregator::new(chat_tx.clone(), 500));
 
-    let chat_tx_clone = chat_tx.clone();
-    rt.spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let platforms = [ChatPlatform::Twitch, ChatPlatform::YouTube];
-        let users = ["xQc", "shroud", "Ninja", "Pokimane", "summit1g", "TimTheTatman"];
-        let messages = [
-            "Let's go!",
-            "GG",
-            "This stream is amazing",
-            "How did you do that?",
-            "First time here, love the content",
-            "Can you play some music?",
-            "W stream",
-            "PogChamp",
-            "Hello from Brazil!",
-            "Just subscribed!",
-        ];
-        let mut rng = fastrand::Rng::new();
-        loop {
-            let platform = platforms[rng.usize(..platforms.len())];
-            let user = users[rng.usize(..users.len())];
-            let msg = messages[rng.usize(..messages.len())];
-            let mock = create_mock_chat_message(platform, "robs_channel", user, msg);
-            let _ = chat_tx_clone.send(robs_chat::message::ChatEvent::Message(Box::new(mock))).await;
-            tokio::time::sleep(std::time::Duration::from_millis(800 + rng.u64(0..1200))).await;
-        }
-    });
+    // The mock chat generator is opt-in: pass `--demo-chat` to inject fake
+    // Twitch/YouTube traffic (handy for styling the chat panel without a
+    // real connection). Default off — without the flag no messages are
+    // generated and the chat panel stays empty.
+    if std::env::args().skip(1).any(|arg| arg == "--demo-chat") {
+        let chat_tx_clone = chat_tx.clone();
+        rt.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let platforms = [ChatPlatform::Twitch, ChatPlatform::YouTube];
+            let users = ["xQc", "shroud", "Ninja", "Pokimane", "summit1g", "TimTheTatman"];
+            let messages = [
+                "Let's go!",
+                "GG",
+                "This stream is amazing",
+                "How did you do that?",
+                "First time here, love the content",
+                "Can you play some music?",
+                "W stream",
+                "PogChamp",
+                "Hello from Brazil!",
+                "Just subscribed!",
+            ];
+            let mut rng = fastrand::Rng::new();
+            loop {
+                let platform = platforms[rng.usize(..platforms.len())];
+                let user = users[rng.usize(..users.len())];
+                let msg = messages[rng.usize(..messages.len())];
+                let mock = create_mock_chat_message(platform, "robs_channel", user, msg);
+                let _ = chat_tx_clone.send(robs_chat::message::ChatEvent::Message(Box::new(mock))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(800 + rng.u64(0..1200))).await;
+            }
+        });
+    }
 
     warn_if_ui_flag();
 
