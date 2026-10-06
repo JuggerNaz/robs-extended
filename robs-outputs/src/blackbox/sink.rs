@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 
 use super::config::BlackboxConfig;
+use crate::shared::probe_free_space;
 
 /// Metadata for a segment that has just been finalized (ffmpeg exited and the
 /// output file is complete).
@@ -167,21 +168,12 @@ impl BlackboxSink for LocalFileSink {
     }
 
     fn storage_status(&self) -> StorageStatus {
-        // Ensure the dir exists so the probe targets the right volume; if it
-        // can't be created, fall back to its parent.
-        let probe_path = if fs::metadata(&self.output_dir).is_ok() {
-            self.output_dir.clone()
-        } else if let Some(parent) = self.output_dir.parent() {
-            parent.to_path_buf()
-        } else {
-            return StorageStatus::default();
-        };
-
-        let total = fs4::total_space(&probe_path).unwrap_or(0);
-        let free = fs4::free_space(&probe_path).unwrap_or(0);
+        // Probes the dir's volume, falling back to its parent when the dir
+        // does not yet exist; zeros on failure.
+        let (free_bytes, total_bytes) = probe_free_space(&self.output_dir);
         StorageStatus {
-            free_bytes: free,
-            total_bytes: total,
+            free_bytes,
+            total_bytes,
         }
     }
 }

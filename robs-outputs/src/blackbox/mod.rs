@@ -34,22 +34,18 @@ pub use sink::{BlackboxSink, LocalFileSink, SegmentInfo, StorageStatus};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use flume::{Receiver, Sender, TrySendError};
 use parking_lot::RwLock;
 
-use robs_core::event::{BlackboxEvent, BlackboxStatus, BlackboxStorageStatus, EventTx, RobsEvent};
+use robs_core::event::{BlackboxEvent, BlackboxStatus, EventTx, RobsEvent};
+
+use crate::shared::pump::{frame_pump, FramePumpPolicy};
+use crate::shared::{now_ms, sleep_with_stop, FrameInput};
 
 use recovery::recover;
 use segment::ActiveSegment as Seg;
-
-/// One raw captured frame handed to the engine.
-struct FrameInput {
-    data: Vec<u8>,
-    width: u32,
-    height: u32,
-}
 
 /// The Blackbox engine. Owns the worker + monitor threads and the frame
 /// channel. Construct with [`BlackboxEngine::new`], then [`start`](Self::start)
@@ -246,13 +242,6 @@ impl Drop for BlackboxEngine {
     }
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Spawn the writer/rotation worker thread.
 #[allow(clippy::too_many_arguments)]
 fn spawn_worker(
@@ -267,197 +256,167 @@ fn spawn_worker(
     std::thread::Builder::new()
         .name("blackbox-worker".into())
         .spawn(move || {
-            worker_loop(&config, &sink, &status, &rx, &stop_flag, &disk_critical, &events);
+            let policy = BlackboxWorkerPolicy {
+                config,
+                sink,
+                status,
+                disk_critical,
+                stop_flag: Arc::clone(&stop_flag),
+                events,
+                segment_index: 0,
+                finalized_bytes: 0,
+                capture_started_at: None,
+            };
+            frame_pump(policy, &rx, &stop_flag);
         })
         .expect("spawn blackbox-worker")
 }
 
-#[allow(clippy::too_many_arguments)]
-fn worker_loop(
-    config: &BlackboxConfig,
-    sink: &Arc<dyn BlackboxSink>,
-    status: &Arc<RwLock<BlackboxStatus>>,
-    rx: &Receiver<FrameInput>,
-    stop_flag: &AtomicBool,
-    disk_critical: &AtomicBool,
-    events: &EventTx,
-) {
-    let mut segment_index: u64 = 0;
-    let mut active: Option<Seg> = None;
-    let mut finalized_bytes: u64 = 0;
-    let mut capture_started_at: Option<Instant> = None;
+/// The blackbox [`FramePumpPolicy`]: always-on capture with sink-driven
+/// segment paths, `SegmentStarted`/`SegmentClosed` events, a disk-critical
+/// pause gate, and full finalization on shutdown.
+struct BlackboxWorkerPolicy {
+    config: Arc<BlackboxConfig>,
+    sink: Arc<dyn BlackboxSink>,
+    status: Arc<RwLock<BlackboxStatus>>,
+    disk_critical: Arc<AtomicBool>,
+    stop_flag: Arc<AtomicBool>,
+    events: EventTx,
+    segment_index: u64,
+    finalized_bytes: u64,
+    capture_started_at: Option<Instant>,
+}
 
-    let send_ev = |ev: BlackboxEvent| {
-        let _ = events.send(RobsEvent::Blackbox(ev));
-    };
-    let set_last_error = |msg: String| {
-        status.write().last_error = Some(msg);
-    };
+impl BlackboxWorkerPolicy {
+    fn send_ev(&self, ev: BlackboxEvent) {
+        let _ = self.events.send(RobsEvent::Blackbox(ev));
+    }
 
-    loop {
-        if stop_flag.load(Ordering::SeqCst) {
-            break;
+    fn set_last_error(&self, msg: String) {
+        self.status.write().last_error = Some(msg);
+    }
+}
+
+impl FramePumpPolicy for BlackboxWorkerPolicy {
+    type Seg = Seg;
+
+    fn recv_timeout(&self, has_active: bool) -> Duration {
+        if has_active {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_millis(500)
         }
+    }
 
-        // Disk-critical pause: finalize whatever we have and idle until the
-        // monitor clears the flag. We do NOT open new segments while paused.
-        if disk_critical.load(Ordering::Acquire) {
-            if let Some(seg) = active.take() {
-                finalized_bytes =
-                    close_segment(seg, sink, status, finalized_bytes, &send_ev, capture_started_at);
+    fn should_rotate(&self, active: Option<&Seg>, frame: &FrameInput) -> bool {
+        match active {
+            None => true,
+            Some(seg) => {
+                !seg.dims_match(frame.width, frame.height)
+                    || seg.elapsed().as_secs() >= self.config.segment_duration_secs
+                    || seg.bytes_in() >= self.config.segment_size_bytes()
             }
-            status.write().disk_paused = true;
-            sleep_with_stop(Duration::from_millis(500), stop_flag);
-            continue;
+        }
+    }
+
+    fn open_segment(&mut self, frame: &FrameInput, replacing: bool) -> anyhow::Result<Seg> {
+        if !replacing && self.capture_started_at.is_none() {
+            self.capture_started_at = Some(Instant::now());
+        }
+        if replacing {
+            self.segment_index += 1;
+        }
+        let path = self.sink.segment_target(self.segment_index, chrono::Utc::now());
+        Seg::open(&self.config, self.segment_index, frame.width, frame.height, path)
+    }
+
+    fn on_segment_opened(&mut self, seg: &Seg) {
+        // Record status for the freshly opened segment.
+        {
+            let mut s = self.status.write();
+            s.current_segment_index = seg.index();
+            s.current_segment_path = Some(seg.path().to_string_lossy().into_owned());
+        }
+        self.send_ev(BlackboxEvent::SegmentStarted {
+            path: seg.path().to_string_lossy().into_owned(),
+            index: seg.index(),
+        });
+    }
+
+    fn on_open_write_error(&mut self, seg: Seg, err: anyhow::Error, replacing: bool) {
+        let phase = if replacing { "after rotate" } else { "on open" };
+        self.send_ev(BlackboxEvent::Error {
+            message: format!("ffmpeg write failed {phase}: {err}"),
+        });
+        self.set_last_error(format!("{err}"));
+        if !replacing {
+            // Close the just-opened segment and back off. (After a rotate the
+            // segment is dropped; the next frame reopens from idle.)
+            self.finalize_segment(seg);
+        }
+    }
+
+    fn on_open_error(&mut self, err: anyhow::Error, replacing: bool) {
+        let phase = if replacing { " after rotate" } else { "" };
+        self.send_ev(BlackboxEvent::Error {
+            message: format!("failed to open segment{phase}: {err}"),
+        });
+        self.set_last_error(format!("{err}"));
+    }
+
+    fn finalize_segment(&mut self, seg: Seg) {
+        self.finalized_bytes = close_segment(
+            seg,
+            &self.sink,
+            &self.status,
+            self.finalized_bytes,
+            &self.events,
+            self.capture_started_at,
+        );
+    }
+
+    fn on_segment_died(&mut self, seg: Seg, err: anyhow::Error) {
+        self.send_ev(BlackboxEvent::Error {
+            message: format!("ffmpeg died mid-segment: {err}"),
+        });
+        self.set_last_error(format!("{err}"));
+        self.finalize_segment(seg);
+        sleep_with_stop(Duration::from_millis(500), &self.stop_flag);
+    }
+
+    fn should_pause(&self) -> bool {
+        self.disk_critical.load(Ordering::Acquire)
+    }
+
+    fn on_pause(&mut self) {
+        self.status.write().disk_paused = true;
+    }
+
+    fn on_active_tick(&mut self) {
+        let mut s = self.status.write();
+        if s.disk_paused {
+            s.disk_paused = false;
+        }
+    }
+
+    fn shutdown(&mut self, active: Option<Seg>) {
+        // Finalize the in-flight segment.
+        if let Some(seg) = active {
+            self.finalize_segment(seg);
         }
         {
-            let mut s = status.write();
-            if s.disk_paused {
-                s.disk_paused = false;
-            }
-        }
-
-        if active.is_none() {
-            // Need a frame to learn the input format before spawning ffmpeg.
-            match rx.recv_timeout(Duration::from_millis(500)) {
-                Ok(frame) => {
-                    if capture_started_at.is_none() {
-                        capture_started_at = Some(Instant::now());
-                    }
-                    match open_segment(config, sink, segment_index, frame.width, frame.height) {
-                        Ok(mut seg) => {
-                            mark_segment_open(status, &seg);
-                            send_ev(BlackboxEvent::SegmentStarted {
-                                path: seg.path().to_string_lossy().into_owned(),
-                                index: seg.index(),
-                            });
-                            if let Err(e) = seg.write_frame(&frame.data) {
-                                send_ev(BlackboxEvent::Error {
-                                    message: format!("ffmpeg write failed on open: {e}"),
-                                });
-                                set_last_error(format!("{e}"));
-                                // Close the just-opened segment and back off.
-                                finalized_bytes = close_segment(
-                                    seg, sink, status, finalized_bytes, &send_ev,
-                                    capture_started_at,
-                                );
-                            } else {
-                                active = Some(seg);
-                            }
-                        }
-                        Err(e) => {
-                            send_ev(BlackboxEvent::Error {
-                                message: format!("failed to open segment: {e}"),
-                            });
-                            set_last_error(format!("{e}"));
-                            sleep_with_stop(Duration::from_secs(1), stop_flag);
-                        }
-                    }
-                }
-                Err(flume::RecvTimeoutError::Timeout) => continue,
-                Err(flume::RecvTimeoutError::Disconnected) => break,
-            }
-        } else {
-            // Active segment open: pull the next frame and write or rotate.
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(frame) => {
-                    let rotate = {
-                        let seg = active.as_ref().expect("active segment");
-                        !seg.dims_match(frame.width, frame.height)
-                            || seg.elapsed().as_secs() >= config.segment_duration_secs
-                            || seg.bytes_in() >= config.segment_size_bytes()
-                    };
-
-                    if rotate {
-                        let old = active
-                            .take()
-                            .expect("active segment present in else branch");
-                        finalized_bytes =
-                            close_segment(old, sink, status, finalized_bytes, &send_ev, capture_started_at);
-                        segment_index += 1;
-                        match open_segment(config, sink, segment_index, frame.width, frame.height) {
-                            Ok(mut seg) => {
-                                mark_segment_open(status, &seg);
-                                send_ev(BlackboxEvent::SegmentStarted {
-                                    path: seg.path().to_string_lossy().into_owned(),
-                                    index: seg.index(),
-                                });
-                                if let Err(e) = seg.write_frame(&frame.data) {
-                                    send_ev(BlackboxEvent::Error {
-                                        message: format!("ffmpeg write failed after rotate: {e}"),
-                                    });
-                                    set_last_error(format!("{e}"));
-                                } else {
-                                    active = Some(seg);
-                                }
-                            }
-                            Err(e) => {
-                                send_ev(BlackboxEvent::Error {
-                                    message: format!("failed to open segment after rotate: {e}"),
-                                });
-                                set_last_error(format!("{e}"));
-                                sleep_with_stop(Duration::from_secs(1), stop_flag);
-                            }
-                        }
-                    } else if let Err(e) = active
-                        .as_mut()
-                        .expect("active segment")
-                        .write_frame(&frame.data)
-                    {
-                        // ffmpeg died (broken pipe). Drop the segment, report,
-                        // and let the next iteration reopen a fresh one.
-                        send_ev(BlackboxEvent::Error {
-                            message: format!("ffmpeg died mid-segment: {e}"),
-                        });
-                        set_last_error(format!("{e}"));
-                        let dead = active
-                            .take()
-                            .expect("active segment present");
-                        finalized_bytes =
-                            close_segment(dead, sink, status, finalized_bytes, &send_ev, capture_started_at);
-                        sleep_with_stop(Duration::from_millis(500), stop_flag);
-                    }
-                }
-                Err(flume::RecvTimeoutError::Timeout) => continue,
-                Err(flume::RecvTimeoutError::Disconnected) => break,
+            let mut s = self.status.write();
+            s.running = false;
+            s.capturing = false;
+            s.current_segment_path = None;
+            s.bytes_written = self.finalized_bytes;
+            if let Some(start) = self.capture_started_at {
+                s.total_duration_ms = s
+                    .total_duration_ms
+                    .saturating_add(start.elapsed().as_millis() as u64);
             }
         }
     }
-
-    // Shutdown: finalize the in-flight segment.
-    if let Some(seg) = active.take() {
-        finalized_bytes =
-            close_segment(seg, sink, status, finalized_bytes, &send_ev, capture_started_at);
-    }
-    {
-        let mut s = status.write();
-        s.running = false;
-        s.capturing = false;
-        s.current_segment_path = None;
-        s.bytes_written = finalized_bytes;
-        if let Some(start) = capture_started_at {
-            s.total_duration_ms = s.total_duration_ms.saturating_add(start.elapsed().as_millis() as u64);
-        }
-    }
-}
-
-/// Open a new segment, delegating path selection to the sink.
-fn open_segment(
-    config: &BlackboxConfig,
-    sink: &Arc<dyn BlackboxSink>,
-    index: u64,
-    width: u32,
-    height: u32,
-) -> anyhow::Result<Seg> {
-    let path = sink.segment_target(index, chrono::Utc::now());
-    Seg::open(config, index, width, height, path)
-}
-
-/// Record status for a freshly opened segment.
-fn mark_segment_open(status: &Arc<RwLock<BlackboxStatus>>, seg: &Seg) {
-    let mut s = status.write();
-    s.current_segment_index = seg.index();
-    s.current_segment_path = Some(seg.path().to_string_lossy().into_owned());
 }
 
 /// Finalize a segment: close ffmpeg, clear the crash marker, notify the sink,
@@ -467,9 +426,12 @@ fn close_segment(
     sink: &Arc<dyn BlackboxSink>,
     status: &Arc<RwLock<BlackboxStatus>>,
     mut finalized_bytes: u64,
-    send_ev: &impl Fn(BlackboxEvent),
+    events: &EventTx,
     capture_started_at: Option<Instant>,
 ) -> u64 {
+    let send_ev = |ev: BlackboxEvent| {
+        let _ = events.send(RobsEvent::Blackbox(ev));
+    };
     let index = seg.index();
     let path = seg.path().to_path_buf();
     match seg.close() {
@@ -508,37 +470,3 @@ fn close_segment(
     finalized_bytes
 }
 
-/// Sleep for `d`, but wake early if `stop_flag` becomes set.
-fn sleep_with_stop(d: Duration, stop_flag: &AtomicBool) {
-    let step = Duration::from_millis(100);
-    let mut remaining = d;
-    while remaining > Duration::ZERO {
-        if stop_flag.load(Ordering::SeqCst) {
-            return;
-        }
-        let t = remaining.min(step);
-        std::thread::sleep(t);
-        remaining = remaining.saturating_sub(t);
-    }
-}
-
-/// Re-export so `monitor` can build storage snapshots for status.
-pub(crate) fn build_storage_status(
-    free_bytes: u64,
-    total_bytes: u64,
-    warn: bool,
-    critical: bool,
-) -> BlackboxStorageStatus {
-    let free_percent = if total_bytes == 0 {
-        0.0
-    } else {
-        (free_bytes as f64 / total_bytes as f64 * 100.0) as f32
-    };
-    BlackboxStorageStatus {
-        free_bytes,
-        total_bytes,
-        free_percent,
-        low_warning: warn,
-        critical,
-    }
-}
