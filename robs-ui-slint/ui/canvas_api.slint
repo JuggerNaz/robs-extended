@@ -43,6 +43,18 @@ export struct DsRow {
     value: string,
 }
 
+// One cell of the quad view: a 2x2 grid of the first four scenes shown in
+// the stage. The image is the scene's representative capture frame (already
+// uploaded by the glue); `has-frame` false renders the placeholder tile.
+export struct QuadCellView {
+    // Scene name; empty means the slot has no scene (fewer than 4 scenes).
+    name: string,
+    image: image,
+    has-frame: bool,
+    // The cell's scene is the currently selected scene.
+    current: bool,
+}
+
 export global CanvasApi {
     // ---- Commands (UI -> glue) ----
     // Pointer traffic from the canvas overlay; coordinates are
@@ -143,4 +155,11 @@ export global CanvasApi {
     callback logo-press(float, float);
     callback logo-drag-to(float, float);
     callback logo-release();
+
+    // ---- Quad view (preview-only 2x2 of the first four scenes) ----
+    // Toggled by the QUAD VIEW button in the scene bar (markup-owned); the
+    // glue only READS it each tick to decide whether to refresh the cells.
+    in-out property <bool> quad-active;
+    // One row per slot (always 4); rows update only when a cell changes.
+    in property <[QuadCellView]> quad-cells;
 }

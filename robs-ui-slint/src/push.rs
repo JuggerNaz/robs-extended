@@ -14,7 +14,7 @@ use crate::canvas_glue::{ann_bbox, path_commands, tool_index, TEXT_FONT_SIZE};
 use crate::layout;
 use crate::{
     AnnotationView, Api, CanvasApi, CanvasTextView, DsRow, LogLineView, MainWindow, PanelsApi,
-    SceneItemView,
+    QuadCellView, SceneItemView,
 };
 use robs_controller::annotation_raster::DataStringRow;
 use robs_controller::state::{EventLogEntry, EventLogKind, PreviewFrame};
@@ -31,6 +31,9 @@ const LOG_ROWS: usize = 100;
 
 /// Snapshot-toast display window (matches the old egui panel).
 const SNAPSHOT_FLASH: Duration = Duration::from_millis(1500);
+
+/// Quad-view cells (2x2 grid; the first four scenes, sorted like the rail).
+const QUAD_CELLS: usize = 4;
 
 /// Handles to the models installed in `Api`, plus mirrors of the last pushed
 /// data for change detection. The two item models are owned as `ModelRc`
@@ -64,6 +67,11 @@ pub struct PushedState {
     logo_mirror: Option<String>,
     /// Editing-active at the previous push (seeds `text-input` on rising edge).
     editing_prev: bool,
+    /// Quad-view cells (always `QUAD_CELLS` rows) + per-slot change mirrors.
+    pub quad_cells: ModelRc<QuadCellView>,
+    quad_mirror: [Option<QuadSig>; QUAD_CELLS],
+    /// Whether `quad_cells` has been installed on `CanvasApi` yet.
+    quad_installed: bool,
 }
 
 /// Canvas fit scale from the last push (scene units per canvas pixel;
@@ -97,6 +105,18 @@ struct OverlaySig {
     color: [u8; 4],
     x: f32,
     y: f32,
+}
+
+/// Change-detection signature of one pushed quad-view cell.
+#[derive(Clone, PartialEq)]
+struct QuadSig {
+    /// Scene item whose frame is shown (None = empty slot / no capture).
+    item: Option<SceneItemId>,
+    /// Version of that frame (None when there is no live frame).
+    version: Option<u64>,
+    /// Scene name (None = slot beyond the scene count).
+    name: Option<String>,
+    current: bool,
 }
 
 struct ItemMirror {
@@ -152,6 +172,9 @@ impl PushedState {
             ds_mirror: Vec::new(),
             logo_mirror: None,
             editing_prev: false,
+            quad_cells: ModelRc::new(VecModel::default()),
+            quad_mirror: [None, None, None, None],
+            quad_installed: false,
         }
     }
 }
@@ -412,6 +435,9 @@ pub fn push_state(
         scene_h,
         canvas_scale,
     );
+
+    // ---- Quad view cells (refreshed only while quad view is active) ----
+    push_quad(&component.global::<CanvasApi>(), controller, pushed);
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +683,83 @@ fn push_canvas(
         None => api.set_editing(false),
     }
     pushed.editing_prev = editing.is_some();
+}
+
+// ---------------------------------------------------------------------------
+// Quad view
+// ---------------------------------------------------------------------------
+
+/// Push the quad-view cells: the first four scenes (sorted like the scenes
+/// rail) as a 2x2 grid. Each cell shows the scene's most representative
+/// capture frame — the topmost visible capture item that has a live preview
+/// frame (background scenes keep their textures warm, so every live cell can
+/// update at full frame rate); scenes without any live frame fall back to a
+/// placeholder tile. Version-gated like the item frames. While quad view is
+/// inactive the cells are NOT refreshed (the model keeps its last state;
+/// it self-heals on re-enable because frame versions have moved on).
+fn push_quad(api: &CanvasApi, controller: &RobsController, pushed: &mut PushedState) {
+    // Install the model once (before the event loop starts) so the markup
+    // always sees exactly `QUAD_CELLS` rows.
+    if !pushed.quad_installed {
+        pushed.quad_installed = true;
+        api.set_quad_cells(pushed.quad_cells.clone());
+    }
+
+    if !api.get_quad_active() {
+        return;
+    }
+
+    // First four scenes, sorted like the rail. Copied out up front — no
+    // controller borrows are held across model mutation.
+    let mut names: Vec<String> = controller
+        .scenes
+        .list()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    names.sort();
+    let current = controller.scenes.current_scene_name();
+
+    for slot in 0..QUAD_CELLS {
+        let name = names.get(slot);
+        let scene = name.and_then(|n| controller.scenes.get(n));
+        // Representative frame: topmost visible capture item (render order)
+        // with a live preview frame, falling back to the first visible
+        // capture item (placeholder tile) or None (empty slot).
+        let chosen: Option<SceneItemId> = scene
+            .map(|s| {
+                let caps: Vec<_> = s
+                    .visible_items()
+                    .into_iter()
+                    .filter(|i| i.capture().is_some())
+                    .collect();
+                caps.iter()
+                    .find(|i| controller.preview.preview_frames.contains_key(&i.id()))
+                    .map(|i| i.id())
+                    .or_else(|| caps.first().map(|i| i.id()))
+            })
+            .unwrap_or_default();
+        let frame = chosen.and_then(|id| controller.preview.preview_frames.get(&id));
+        let is_current = name.map(|n| Some(n.as_str()) == current).unwrap_or(false);
+        let sig = QuadSig {
+            item: chosen,
+            version: frame.map(|f| f.version),
+            name: name.cloned(),
+            current: is_current,
+        };
+        if pushed.quad_mirror[slot].as_ref() != Some(&sig) {
+            pushed.quad_mirror[slot] = Some(sig);
+            pushed.quad_cells.set_row_data(
+                slot,
+                QuadCellView {
+                    name: name.map(|n| SharedString::from(n.as_str())).unwrap_or_default(),
+                    image: frame.map(frame_to_image).unwrap_or_default(),
+                    has_frame: frame.is_some(),
+                    current: is_current,
+                },
+            );
+        }
+    }
 }
 
 /// RGBA preview frame -> Slint image (straight alpha, unmultiplied).

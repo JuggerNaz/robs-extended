@@ -411,12 +411,12 @@ export component MainWindow inherits Window {
                 height: 34px;
                 border-radius: Theme.radius-sm;
                 border-width: 1px;
-                border-color: quad-touch.has-hover ? Theme.accent : Theme.border;
-                background: quad-touch.has-hover ? Theme.card-alt : Theme.card;
+                border-color: quad-touch.has-hover || CanvasApi.quad-active ? Theme.accent : Theme.border;
+                background: quad-touch.has-hover || CanvasApi.quad-active ? Theme.card-alt : Theme.card;
 
                 quad-touch := TouchArea {
                     mouse-cursor: MouseCursor.pointer;
-                    clicked => { }
+                    clicked => { CanvasApi.quad-active = !CanvasApi.quad-active; }
                 }
                 HorizontalLayout {
                     x: 12px;
@@ -485,12 +485,14 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Letterboxed scene output (geometry pushed from the glue).
+        // Letterboxed scene output (geometry pushed from the glue). Hidden
+        // while the quad view owns the stage (sibling quad stage below).
         Rectangle {
             x: Api.canvas-x - (rail-shown ? Theme.rail-w : 0px);
             y: Api.canvas-y - Theme.topbar-h;
             width: Api.canvas-width;
             height: Api.canvas-height;
+            visible: !CanvasApi.quad-active;
             background: Theme.canvas-bg;
             border-width: 1px;
             border-color: Theme.border;
@@ -854,6 +856,101 @@ export component MainWindow inherits Window {
                     color: white;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                }
+            }
+        }
+
+        // ---- Quad view: 2x2 grid of the first four scenes in the stage.
+        // PREVIEW-ONLY — recording/streaming keep composing the current
+        // scene. The single-scene canvas above is hidden while this is
+        // active; each cell contain-fits its pushed frame (Slint letterboxes
+        // for free via image-fit: contain). ----
+        if CanvasApi.quad-active: Rectangle {
+            x: Api.canvas-x - (rail-shown ? Theme.rail-w : 0px);
+            y: Api.canvas-y - Theme.topbar-h;
+            width: Api.canvas-width;
+            height: Api.canvas-height;
+            background: Theme.canvas-bg;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            for cell[i] in CanvasApi.quad-cells: Rectangle {
+                property <length> gap: 6px;
+                property <length> cell-w: (parent.width - 3 * gap) / 2;
+                property <length> cell-h: (parent.height - 3 * gap) / 2;
+                x: gap + (Math.mod(i, 2) == 1 ? cell-w + gap : 0px);
+                y: gap + (i >= 2 ? cell-h + gap : 0px);
+                width: cell-w;
+                height: cell-h;
+                border-radius: Theme.radius-sm;
+                border-width: cell.current ? 2px : 1px;
+                border-color: cell.current ? Theme.accent : Theme.border;
+                clip: true;
+
+                // Live frame, contain-fit into the cell.
+                if cell.has-frame: Image {
+                    width: 100%;
+                    height: 100%;
+                    source: cell.image;
+                    image-fit: contain;
+                }
+
+                // Placeholder for scenes without a capture frame and for
+                // empty slots (fewer than four scenes).
+                if !cell.has-frame: Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: Theme.placeholder;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        if cell.name != "": Text {
+                            width: parent.width - 16px;
+                            x: 8px;
+                            text: cell.name;
+                            font-size: Theme.font-md;
+                            font-weight: 700;
+                            color: Theme.text;
+                            horizontal-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: cell.name == "" ? "No scene" : "No source yet";
+                            font-size: Theme.font-xs;
+                            color: Theme.text-dim;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                // Scene-name chip (top-left).
+                Rectangle {
+                    x: 6px;
+                    y: 6px;
+                    width: min(quad-name.preferred-width + 14px, parent.width - 12px);
+                    height: 20px;
+                    border-radius: 3px;
+                    background: #000000A0;
+                    quad-name := Text {
+                        x: 7px;
+                        width: parent.width - 14px;
+                        height: parent.height;
+                        text: cell.name;
+                        font-size: Theme.font-xs;
+                        font-weight: 700;
+                        color: white;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // Click a cell to make that scene current (its border
+                // highlights; same pick as the scene-bar chips).
+                cell-touch := TouchArea {
+                    mouse-cursor: cell.name != "" && self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+                    clicked => {
+                        if (cell.name != "") { Api.select-scene(cell.name); }
+                    }
                 }
             }
         }
