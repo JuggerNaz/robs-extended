@@ -111,11 +111,27 @@ export global CanvasApi {
     // ---- Scene overlays: data string + company logo ----
     // Baked into the composed output the same way; this is the live preview.
     in property <bool> ds-visible;
-    // The two telemetry groups (bottom-left, bottom-right).
+    // The two telemetry groups (draggable; bottom-left / bottom-right by
+    // default).
     in property <[DsRow]> ds-rows-left;
     in property <[DsRow]> ds-rows-right;
     // Box inset from the canvas edges (canvas px).
     in property <float> ds-inset;
+    // Per-group placement: once a box has been dragged, custom is true and
+    // x/y carry its top-left in canvas px; otherwise the markup keeps its
+    // legacy bottom-corner anchoring.
+    in property <bool> ds-left-custom;
+    in property <float> ds-left-x;
+    in property <float> ds-left-y;
+    in property <bool> ds-right-custom;
+    in property <float> ds-right-x;
+    in property <float> ds-right-y;
+    // Group dragging (group: 0 = left box, 1 = right). Press carries the
+    // box's top-left plus the press point in canvas px; drag/release use
+    // the same mouse space as the logo callbacks.
+    callback ds-press(int, float, float, float, float);
+    callback ds-drag-to(int, float, float);
+    callback ds-release();
     in property <bool> logo-visible;
     in property <image> logo-image;
     // Logo top-left + rendered size in canvas px.

@@ -8,7 +8,7 @@
 //! pipeline).
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
-use robs_core::{Annotation, AnnotationShape};
+use robs_core::{Annotation, AnnotationShape, Position};
 
 /// Font size (in scene units) used for `Text` annotations before scaling to
 /// the frame.
@@ -326,6 +326,14 @@ pub struct DataStringRow {
     pub value: String,
 }
 
+/// One data-string group: its rows plus the box placement. `position` is
+/// the box's top-left in SCENE coordinates; `None` keeps the legacy
+/// anchoring (first group bottom-left, second bottom-right).
+pub struct DataStringGroup {
+    pub rows: Vec<DataStringRow>,
+    pub position: Option<Position>,
+}
+
 /// Data-string layout constants (scene units, scaled like coordinates).
 const DS_FONT_SIZE: f32 = 22.0;
 const DS_ROW_HEIGHT: f32 = 30.0;
@@ -347,16 +355,17 @@ fn measure_text(font: &FontVec, text: &str, size: f32) -> f32 {
         .sum()
 }
 
-/// Composite the data-string overlay: one semi-transparent box per group —
-/// the first anchored bottom-left, the second bottom-right. Rows render as
-/// `LABEL` + `VALUE` in two columns (the label column sized by the widest
-/// label), matching the ROV mockup. No-op without a font or with empty
-/// groups.
+/// Composite the data-string overlay: one semi-transparent box per group.
+/// A group whose `position` is `None` falls back to the legacy anchoring
+/// (first bottom-left, second bottom-right); otherwise the position is the
+/// box's top-left in SCENE coordinates. Rows render as `LABEL` + `VALUE` in
+/// two columns (the label column sized by the widest label), matching the
+/// ROV mockup. No-op without a font or with empty groups.
 pub fn composite_data_string(
     frame: &mut [u8],
     frame_w: u32,
     frame_h: u32,
-    groups: &[Vec<DataStringRow>],
+    groups: &[DataStringGroup],
     scale_x: f32,
     scale_y: f32,
     font: Option<&FontVec>,
@@ -367,7 +376,8 @@ pub fn composite_data_string(
     let pad = DS_PAD * scale_x;
     let inset = DS_INSET * scale_x;
     let gap = DS_LABEL_GAP * scale_x;
-    for (group_idx, rows) in groups.iter().enumerate().take(2) {
+    for (group_idx, group) in groups.iter().enumerate().take(2) {
+        let rows = &group.rows;
         if rows.is_empty() {
             continue;
         }
@@ -381,12 +391,18 @@ pub fn composite_data_string(
             .fold(0.0_f32, f32::max);
         let box_w = pad * 2.0 + label_w + gap + value_w;
         let box_h = pad * 2.0 + row_h * rows.len() as f32;
-        let box_x = if group_idx == 0 {
-            inset
-        } else {
-            (frame_w as f32 - inset - box_w).max(0.0)
+        let (box_x, box_y) = match group.position {
+            // User-placed: the stored scene point is the box's top-left.
+            Some(pos) => (pos.x * scale_x, pos.y * scale_y),
+            None => (
+                if group_idx == 0 {
+                    inset
+                } else {
+                    (frame_w as f32 - inset - box_w).max(0.0)
+                },
+                (frame_h as f32 - inset - box_h).max(0.0),
+            ),
         };
-        let box_y = (frame_h as f32 - inset - box_h).max(0.0);
         fill_rect(
             frame,
             frame_w,
@@ -513,10 +529,13 @@ mod tests {
         };
         let (w, h) = (400u32, 300u32);
         let mut frame = vec![255u8; (w * h * 4) as usize];
-        let groups = vec![vec![DataStringRow {
-            label: "EASTING".to_string(),
-            value: "123456 m".to_string(),
-        }]];
+        let groups = vec![DataStringGroup {
+            rows: vec![DataStringRow {
+                label: "EASTING".to_string(),
+                value: "123456 m".to_string(),
+            }],
+            position: None,
+        }];
         composite_data_string(&mut frame, w, h, &groups, 1.0, 1.0, Some(&font));
         let px = |x: u32, y: u32| frame[((y * w + x) * 4) as usize];
         // Inside the bottom-left box but left of the label pen (in the
@@ -527,6 +546,31 @@ mod tests {
         );
         // Well above the box: untouched.
         assert_eq!(px(24, 100), 255);
+    }
+
+    #[test]
+    fn data_string_custom_position_moves_the_box() {
+        let Some(font) = load_system_font() else {
+            return; // font discovery is environment-dependent
+        };
+        let (w, h) = (400u32, 300u32);
+        let mut frame = vec![255u8; (w * h * 4) as usize];
+        let groups = vec![DataStringGroup {
+            rows: vec![DataStringRow {
+                label: "EASTING".to_string(),
+                value: "123456 m".to_string(),
+            }],
+            position: Some(Position::new(100.0, 100.0)),
+        }];
+        composite_data_string(&mut frame, w, h, &groups, 1.0, 1.0, Some(&font));
+        let px = |x: u32, y: u32| frame[((y * w + x) * 4) as usize];
+        // Inside the relocated box (backdrop padding left of the label pen).
+        assert!(
+            px(105, 105) < 200,
+            "expected a darkened pixel inside the moved data-string box"
+        );
+        // The legacy bottom-left spot stays untouched.
+        assert_eq!(px(24, 260), 255);
     }
 
     #[test]

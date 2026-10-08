@@ -109,6 +109,20 @@ struct ItemMirror {
     has_frame: bool,
 }
 
+impl PushedState {
+    /// Index of the pushed text-overlay row with `id`, with the mirror
+    /// already moved to `(x, y)`. Used by the drag glue's immediate canvas
+    /// feedback: the caller updates the model row in place and the next
+    /// tick's signature comparison then sees no change and skips the
+    /// rebuild. `None` when no such row is currently pushed.
+    pub(crate) fn move_overlay_row(&mut self, id: i32, x: f32, y: f32) -> Option<usize> {
+        let i = self.overlay_mirror.iter().position(|s| s.id == id)?;
+        self.overlay_mirror[i].x = x;
+        self.overlay_mirror[i].y = y;
+        Some(i)
+    }
+}
+
 impl ItemMirror {
     /// True when any pushed field changed and the row must be re-set.
     fn differs_from(&self, id: SceneItemId, row: &SceneItemView) -> bool {
@@ -562,6 +576,19 @@ fn push_canvas(
     // ---- Scene overlays: data string + company logo ----
     api.set_ds_visible(controller.overlay.data_string_enabled);
     api.set_ds_inset(16.0 * scale);
+    // Group placements: explicit scene positions once a box has been
+    // dragged (pushed as canvas px); otherwise the markup keeps its legacy
+    // bottom-corner anchoring.
+    api.set_ds_left_custom(controller.overlay.data_string_left.is_some());
+    if let Some(pos) = controller.overlay.data_string_left {
+        api.set_ds_left_x(pos.x * scale);
+        api.set_ds_left_y(pos.y * scale);
+    }
+    api.set_ds_right_custom(controller.overlay.data_string_right.is_some());
+    if let Some(pos) = controller.overlay.data_string_right {
+        api.set_ds_right_x(pos.x * scale);
+        api.set_ds_right_y(pos.y * scale);
+    }
     if controller.overlay.data_string_enabled {
         let groups = controller.data_string_rows();
         let sig: Vec<Vec<(String, String)>> = groups

@@ -54,6 +54,10 @@ impl OverlayService {
             logo_x: self.logo_position.x,
             logo_y: self.logo_position.y,
             logo_height_fraction: self.logo_height_fraction,
+            ds_left_x: self.data_string_left.map(|p| p.x),
+            ds_left_y: self.data_string_left.map(|p| p.y),
+            ds_right_x: self.data_string_right.map(|p| p.x),
+            ds_right_y: self.data_string_right.map(|p| p.y),
         }
     }
 

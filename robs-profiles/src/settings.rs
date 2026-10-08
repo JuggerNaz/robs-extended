@@ -475,6 +475,14 @@ pub struct OverlaySettings {
     pub logo_y: f32,
     /// Logo height as a fraction of the scene output height.
     pub logo_height_fraction: f32,
+    /// Data-string LEFT box top-left in scene coordinates. `None` = the
+    /// legacy bottom-left corner anchoring (box not moved yet).
+    pub ds_left_x: Option<f32>,
+    pub ds_left_y: Option<f32>,
+    /// Data-string RIGHT box top-left in scene coordinates. `None` = the
+    /// legacy bottom-right corner anchoring.
+    pub ds_right_x: Option<f32>,
+    pub ds_right_y: Option<f32>,
 }
 
 impl Default for OverlaySettings {
@@ -486,6 +494,10 @@ impl Default for OverlaySettings {
             logo_x: 24.0,
             logo_y: 24.0,
             logo_height_fraction: 0.08,
+            ds_left_x: None,
+            ds_left_y: None,
+            ds_right_x: None,
+            ds_right_y: None,
         }
     }
 }

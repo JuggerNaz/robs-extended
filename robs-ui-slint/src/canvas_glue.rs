@@ -20,7 +20,7 @@ use robs_core::{
     Annotation, AnnotationId, AnnotationShape, AnnotationTool, ObjectId, Position, Scale,
     SceneItemId,
 };
-use slint::{Color, ComponentHandle, ModelRc, VecModel};
+use slint::{Color, ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::{CanvasApi, MainWindow, push};
 
@@ -60,6 +60,9 @@ pub struct CanvasUi {
     item_dims0: (f32, f32),
     /// Logo drag: `(grab canvas px, logo scene origin at press)`.
     logo_grab: Option<(f32, f32, f32, f32)>,
+    /// Data-string group drag: `(group, origin scene x/y at press, grab
+    /// canvas px)`.
+    ds_grab: Option<(usize, f32, f32, f32, f32)>,
 }
 
 impl CanvasUi {
@@ -71,6 +74,7 @@ impl CanvasUi {
             item_scale0: (1.0, 1.0),
             item_dims0: (0.0, 0.0),
             logo_grab: None,
+            ds_grab: None,
         }
     }
 }
@@ -204,7 +208,7 @@ pub fn install(
         let state = Rc::clone(state);
         let pushed = Rc::clone(pushed);
         api.on_canvas_move(move |px: f32, py: f32| {
-            let Some(_root) = weak.upgrade() else { return };
+            let Some(root) = weak.upgrade() else { return };
             let scale = pushed.borrow().canvas.scale.max(0.0001);
             let mut c = controller.borrow_mut();
             let mut ui = state.borrow_mut();
@@ -259,9 +263,36 @@ pub fn install(
                     let dx = (px - ui.last_px.0) / scale;
                     let dy = (py - ui.last_px.1) / scale;
                     ui.last_px = (px, py);
-                    if let Some(ov) = c.text_overlays.iter_mut().find(|o| o.id() == id) {
-                        let p = ov.position();
-                        ov.set_position(Position::new(p.x + dx, p.y + dy));
+                    let new_pos = c
+                        .text_overlays
+                        .iter_mut()
+                        .find(|o| o.id() == id)
+                        .map(|ov| {
+                            let p = ov.position();
+                            let np = Position::new(p.x + dx, p.y + dy);
+                            ov.set_position(np);
+                            np
+                        });
+                    if let Some(np) = new_pos {
+                        // Immediate canvas feedback: move the pushed model
+                        // row in place so the label tracks the pointer at
+                        // event rate. The per-tick push alone lags up to a
+                        // full tick interval (250 ms when the engine is
+                        // idle), which drags feel as sluggishness. The
+                        // mirror is kept in sync so the next tick sees no
+                        // change and skips the model rebuild.
+                        let mut pushed = pushed.borrow_mut();
+                        if let Some(i) =
+                            pushed.move_overlay_row(id.0 as i32, np.x * scale, np.y * scale)
+                        {
+                            let api = root.global::<CanvasApi>();
+                            let model = api.get_text_overlays();
+                            if let Some(mut row) = model.row_data(i) {
+                                row.x = np.x * scale;
+                                row.y = np.y * scale;
+                                model.set_row_data(i, row);
+                            }
+                        }
                     }
                 }
             }
@@ -397,6 +428,7 @@ pub fn install(
         let controller = Rc::clone(controller);
         let state = Rc::clone(state);
         let pushed = Rc::clone(pushed);
+        let weak = component.clone();
         api.on_logo_drag_to(move |px: f32, py: f32| {
             let Some((gx, gy, ox, oy)) = state.borrow().logo_grab else {
                 return;
@@ -413,6 +445,15 @@ pub fn install(
             let ny = oy + (py - gy) / scale;
             c.overlay.logo_position =
                 Position::new(nx.clamp(0.0, scene_w as f32), ny.clamp(0.0, scene_h as f32));
+            // Immediate canvas feedback: the per-tick push alone lags up to
+            // a full tick interval (250 ms when the engine is idle), which
+            // drags feel as sluggishness. Rendered size never changes during
+            // a drag, so only the anchor needs writing.
+            if let Some(root) = weak.upgrade() {
+                let api = root.global::<CanvasApi>();
+                api.set_logo_x(c.overlay.logo_position.x * scale);
+                api.set_logo_y(c.overlay.logo_position.y * scale);
+            }
         });
     }
     {
@@ -420,6 +461,75 @@ pub fn install(
         let state = Rc::clone(state);
         api.on_logo_release(move || {
             state.borrow_mut().logo_grab = None;
+            // Persist placement when the drag gesture completes.
+            controller.borrow_mut().save_overlay_settings();
+        });
+    }
+
+    // ---- Scene overlay: data-string group dragging (0 = left, 1 = right) --
+    {
+        let state = Rc::clone(state);
+        let pushed = Rc::clone(pushed);
+        api.on_ds_press(move |group: i32, ox: f32, oy: f32, px: f32, py: f32| {
+            let scale = pushed.borrow().canvas.scale.max(0.0001);
+            // The markup passes the box's canvas top-left plus the press
+            // point, so the first drag continues from wherever the box is
+            // anchored (corner or previously moved spot) without a jump.
+            state.borrow_mut().ds_grab =
+                Some((group.clamp(0, 1) as usize, ox / scale, oy / scale, px, py));
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        let state = Rc::clone(state);
+        let pushed = Rc::clone(pushed);
+        let weak = component.clone();
+        api.on_ds_drag_to(move |group: i32, px: f32, py: f32| {
+            let Some((grabbed, ox, oy, gx, gy)) = state.borrow().ds_grab else {
+                return;
+            };
+            if grabbed != group.clamp(0, 1) as usize {
+                return;
+            }
+            let scale = pushed.borrow().canvas.scale.max(0.0001);
+            let mut c = controller.borrow_mut();
+            let (scene_w, scene_h) = c
+                .scenes
+                .current_scene()
+                .map(|s| s.output_size())
+                .unwrap_or((1920, 1080));
+            // Canvas-px delta -> scene units, clamped to the scene bounds.
+            let pos = Position::new(
+                (ox + (px - gx) / scale).clamp(0.0, scene_w as f32),
+                (oy + (py - gy) / scale).clamp(0.0, scene_h as f32),
+            );
+            if grabbed == 0 {
+                c.overlay.data_string_left = Some(pos);
+            } else {
+                c.overlay.data_string_right = Some(pos);
+            }
+            // Immediate canvas feedback (see the logo drag): write the new
+            // placement straight into the preview so the box tracks the
+            // pointer at event rate instead of the tick rate.
+            if let Some(root) = weak.upgrade() {
+                let api = root.global::<CanvasApi>();
+                if grabbed == 0 {
+                    api.set_ds_left_custom(true);
+                    api.set_ds_left_x(pos.x * scale);
+                    api.set_ds_left_y(pos.y * scale);
+                } else {
+                    api.set_ds_right_custom(true);
+                    api.set_ds_right_x(pos.x * scale);
+                    api.set_ds_right_y(pos.y * scale);
+                }
+            }
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        let state = Rc::clone(state);
+        api.on_ds_release(move || {
+            state.borrow_mut().ds_grab = None;
             // Persist placement when the drag gesture completes.
             controller.borrow_mut().save_overlay_settings();
         });

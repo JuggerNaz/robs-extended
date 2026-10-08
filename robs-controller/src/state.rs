@@ -276,6 +276,12 @@ pub struct OverlayState {
     pub logo_position: robs_core::Position,
     /// Logo height as a fraction of the output height (0.02..=0.5).
     pub logo_height_fraction: f32,
+    /// Data-string LEFT box top-left in scene coordinates. `None` keeps the
+    /// legacy bottom-left corner anchoring until the box is dragged.
+    pub data_string_left: Option<robs_core::Position>,
+    /// Data-string RIGHT box top-left in scene coordinates. `None` keeps the
+    /// legacy bottom-right corner anchoring.
+    pub data_string_right: Option<robs_core::Position>,
 }
 
 impl Default for OverlayState {
@@ -287,6 +293,8 @@ impl Default for OverlayState {
             logo_resized: None,
             logo_position: robs_core::Position::zero(),
             logo_height_fraction: 0.08,
+            data_string_left: None,
+            data_string_right: None,
         }
     }
 }

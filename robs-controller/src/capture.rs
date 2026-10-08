@@ -255,10 +255,24 @@ impl RobsController {
                         self.annotation.record_font.as_ref(),
                     );
                 }
-                // Data-string boxes: the two telemetry groups in the bottom
-                // corners (EASTING/NORTHING/DATE/TIME left, ROV right).
+                // Data-string boxes: the two telemetry groups
+                // (EASTING/NORTHING/DATE/TIME left, ROV right), placed at
+                // their persisted scene positions or the bottom corners by
+                // default.
                 if has_data_string {
-                    let groups = self.data_string_rows();
+                    let ds_positions = [
+                        self.overlay.data_string_left,
+                        self.overlay.data_string_right,
+                    ];
+                    let groups: Vec<crate::annotation_raster::DataStringGroup> = self
+                        .data_string_rows()
+                        .into_iter()
+                        .zip(ds_positions)
+                        .map(|(rows, position)| crate::annotation_raster::DataStringGroup {
+                            rows,
+                            position,
+                        })
+                        .collect();
                     crate::annotation_raster::composite_data_string(
                         &mut scaled_data,
                         out_w,

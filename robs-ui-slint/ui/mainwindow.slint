@@ -596,11 +596,39 @@ export component MainWindow inherits Window {
                 }
             }
 
+            // Single canvas input surface: press/release/move funnel into the
+            // glue, which runs the draw/select/resize state machine. Declared
+            // BEFORE the movable scene overlays (data-string boxes, logo) so
+            // their drag handles sit on top of it — Slint gives the press to
+            // the topmost TouchArea — while every other click lands here.
+            if annot-shown: TouchArea {
+                width: 100%;
+                height: 100%;
+
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        CanvasApi.canvas-press(self.mouse-x / 1px, self.mouse-y / 1px);
+                    }
+                    if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                        CanvasApi.canvas-release(self.mouse-x / 1px, self.mouse-y / 1px);
+                    }
+                }
+                changed mouse-x => {
+                    if (self.pressed) { CanvasApi.canvas-move(self.mouse-x / 1px, self.mouse-y / 1px); }
+                }
+                changed mouse-y => {
+                    if (self.pressed) { CanvasApi.canvas-move(self.mouse-x / 1px, self.mouse-y / 1px); }
+                }
+            }
+
             // ---- Scene overlays (baked into the output the same way) ----
-            // Data-string boxes: telemetry rows in the bottom corners.
+            // Data-string boxes: telemetry rows, bottom corners by default
+            // and draggable (like the logo) once the user moves them.
             if CanvasApi.ds-visible: Rectangle {
-                x: CanvasApi.ds-inset * 1px;
-                y: parent.height - self.height - CanvasApi.ds-inset * 1px;
+                x: CanvasApi.ds-left-custom ? CanvasApi.ds-left-x * 1px : CanvasApi.ds-inset * 1px;
+                y: CanvasApi.ds-left-custom
+                    ? CanvasApi.ds-left-y * 1px
+                    : parent.height - self.height - CanvasApi.ds-inset * 1px;
                 width: ds-left-col.preferred-width + 20px;
                 height: ds-left-col.preferred-height + 14px;
                 background: #000000A0;
@@ -626,10 +654,38 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+
+                // Drag handle (canvas-px coordinates like the logo).
+                // Suppressed while a draw tool is active so shapes can be
+                // drawn over the box.
+                if !CanvasApi.draw-active: TouchArea {
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down) {
+                            CanvasApi.ds-press(0,
+                                (parent.x + self.mouse-x) / 1px,
+                                (parent.y + self.mouse-y) / 1px,
+                                (parent.x + self.mouse-x) / 1px,
+                                (parent.y + self.mouse-y) / 1px);
+                        }
+                        if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                            CanvasApi.ds-release();
+                        }
+                    }
+                    changed mouse-x => {
+                        if (self.pressed) { CanvasApi.ds-drag-to(0, (parent.x + self.mouse-x) / 1px, (parent.y + self.mouse-y) / 1px); }
+                    }
+                    changed mouse-y => {
+                        if (self.pressed) { CanvasApi.ds-drag-to(0, (parent.x + self.mouse-x) / 1px, (parent.y + self.mouse-y) / 1px); }
+                    }
+                }
             }
             if CanvasApi.ds-visible: Rectangle {
-                x: parent.width - self.width - CanvasApi.ds-inset * 1px;
-                y: parent.height - self.height - CanvasApi.ds-inset * 1px;
+                x: CanvasApi.ds-right-custom
+                    ? CanvasApi.ds-right-x * 1px
+                    : parent.width - self.width - CanvasApi.ds-inset * 1px;
+                y: CanvasApi.ds-right-custom
+                    ? CanvasApi.ds-right-y * 1px
+                    : parent.height - self.height - CanvasApi.ds-inset * 1px;
                 width: ds-right-col.preferred-width + 20px;
                 height: ds-right-col.preferred-height + 14px;
                 background: #000000A0;
@@ -655,6 +711,27 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+
+                if !CanvasApi.draw-active: TouchArea {
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down) {
+                            CanvasApi.ds-press(1,
+                                (parent.x + self.mouse-x) / 1px,
+                                (parent.y + self.mouse-y) / 1px,
+                                (parent.x + self.mouse-x) / 1px,
+                                (parent.y + self.mouse-y) / 1px);
+                        }
+                        if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                            CanvasApi.ds-release();
+                        }
+                    }
+                    changed mouse-x => {
+                        if (self.pressed) { CanvasApi.ds-drag-to(1, (parent.x + self.mouse-x) / 1px, (parent.y + self.mouse-y) / 1px); }
+                    }
+                    changed mouse-y => {
+                        if (self.pressed) { CanvasApi.ds-drag-to(1, (parent.x + self.mouse-x) / 1px, (parent.y + self.mouse-y) / 1px); }
+                    }
+                }
             }
             // Company logo — draggable via its own TouchArea layered on top
             // of the Image (canvas-px coordinates like the other tools).
@@ -669,20 +746,22 @@ export component MainWindow inherits Window {
                     height: 100%;
                     source: CanvasApi.logo-image;
                 }
-                TouchArea {
+                // Drag handle; suppressed while a draw tool is active so
+                // shapes can be drawn over the logo.
+                if !CanvasApi.draw-active: TouchArea {
                     pointer-event(ev) => {
                         if (ev.kind == PointerEventKind.down) {
-                            CanvasApi.logo-press(self.mouse-x / 1px, self.mouse-y / 1px);
+                            CanvasApi.logo-press((parent.x + self.mouse-x) / 1px, (parent.y + self.mouse-y) / 1px);
                         }
                         if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
                             CanvasApi.logo-release();
                         }
                     }
                     changed mouse-x => {
-                        if (self.pressed) { CanvasApi.logo-drag-to(self.mouse-x / 1px, self.mouse-y / 1px); }
+                        if (self.pressed) { CanvasApi.logo-drag-to((parent.x + self.mouse-x) / 1px, (parent.y + self.mouse-y) / 1px); }
                     }
                     changed mouse-y => {
-                        if (self.pressed) { CanvasApi.logo-drag-to(self.mouse-x / 1px, self.mouse-y / 1px); }
+                        if (self.pressed) { CanvasApi.logo-drag-to((parent.x + self.mouse-x) / 1px, (parent.y + self.mouse-y) / 1px); }
                     }
                 }
             }
@@ -701,28 +780,6 @@ export component MainWindow inherits Window {
                 ResizeHandle { x: parent.width - self.width; y: 0; }
                 ResizeHandle { x: 0; y: parent.height - self.height; }
                 ResizeHandle { x: parent.width - self.width; y: parent.height - self.height; }
-            }
-
-            // Single canvas input surface: press/release/move funnel into the
-            // glue, which runs the draw/select/resize state machine.
-            if annot-shown: TouchArea {
-                width: 100%;
-                height: 100%;
-
-                pointer-event(ev) => {
-                    if (ev.kind == PointerEventKind.down) {
-                        CanvasApi.canvas-press(self.mouse-x / 1px, self.mouse-y / 1px);
-                    }
-                    if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
-                        CanvasApi.canvas-release(self.mouse-x / 1px, self.mouse-y / 1px);
-                    }
-                }
-                changed mouse-x => {
-                    if (self.pressed) { CanvasApi.canvas-move(self.mouse-x / 1px, self.mouse-y / 1px); }
-                }
-                changed mouse-y => {
-                    if (self.pressed) { CanvasApi.canvas-move(self.mouse-x / 1px, self.mouse-y / 1px); }
-                }
             }
 
             // Inline text-annotation editor (200px wide, like egui). Escape is

@@ -130,6 +130,16 @@ impl RobsController {
         // Restore the scene-overlay settings (toggles, logo file, placement).
         let ov = robs_profiles::settings::OverlaySettings::load_or_default();
         this.overlay.data_string_enabled = ov.data_string_enabled;
+        // A dragged data-string box persists its scene top-left; both
+        // coordinates absent keeps the legacy bottom-corner anchoring.
+        this.overlay.data_string_left = ov
+            .ds_left_x
+            .zip(ov.ds_left_y)
+            .map(|(x, y)| robs_core::Position::new(x, y));
+        this.overlay.data_string_right = ov
+            .ds_right_x
+            .zip(ov.ds_right_y)
+            .map(|(x, y)| robs_core::Position::new(x, y));
         this.overlay.logo_position = robs_core::Position::new(ov.logo_x, ov.logo_y);
         this.overlay.logo_height_fraction = ov.logo_height_fraction.clamp(0.02, 0.5);
         if !ov.logo_path.is_empty() {
