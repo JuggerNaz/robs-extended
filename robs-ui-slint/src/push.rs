@@ -70,8 +70,6 @@ pub struct PushedState {
     /// Quad-view cells (always `QUAD_CELLS` rows) + per-slot change mirrors.
     pub quad_cells: ModelRc<QuadCellView>,
     quad_mirror: [Option<QuadSig>; QUAD_CELLS],
-    /// Whether `quad_cells` has been installed on `CanvasApi` yet.
-    quad_installed: bool,
 }
 
 /// Canvas fit scale from the last push (scene units per canvas pixel;
@@ -174,7 +172,6 @@ impl PushedState {
             editing_prev: false,
             quad_cells: ModelRc::new(VecModel::default()),
             quad_mirror: [None, None, None, None],
-            quad_installed: false,
         }
     }
 }
@@ -689,6 +686,16 @@ fn push_canvas(
 // Quad view
 // ---------------------------------------------------------------------------
 
+/// The blank cell state (placeholder tile, no frame, empty name).
+fn empty_quad_cell() -> QuadCellView {
+    QuadCellView {
+        name: SharedString::default(),
+        image: Image::default(),
+        has_frame: false,
+        current: false,
+    }
+}
+
 /// Push the quad-view cells: the first four scenes (sorted like the scenes
 /// rail) as a 2x2 grid. Each cell shows the scene's most representative
 /// capture frame — the topmost visible capture item that has a live preview
@@ -698,10 +705,13 @@ fn push_canvas(
 /// inactive the cells are NOT refreshed (the model keeps its last state;
 /// it self-heals on re-enable because frame versions have moved on).
 fn push_quad(api: &CanvasApi, controller: &RobsController, pushed: &mut PushedState) {
-    // Install the model once (before the event loop starts) so the markup
-    // always sees exactly `QUAD_CELLS` rows.
-    if !pushed.quad_installed {
-        pushed.quad_installed = true;
+    // The markup's 2x2 `for` loop needs the model to hold exactly
+    // `QUAD_CELLS` rows. `set_row_data` cannot EXTEND a model — the model
+    // starts empty here (0 rows rendered nothing, the blank-quad bug) and
+    // is grown to full size the first time this runs.
+    if pushed.quad_cells.row_count() != QUAD_CELLS {
+        let rows: Vec<QuadCellView> = (0..QUAD_CELLS).map(|_| empty_quad_cell()).collect();
+        pushed.quad_cells = ModelRc::new(VecModel::from(rows));
         api.set_quad_cells(pushed.quad_cells.clone());
     }
 
