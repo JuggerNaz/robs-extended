@@ -7,7 +7,7 @@
 //! blackbox, anomaly, QID, and the preview frame tap.
 
 use super::clips::ClipMark;
-use super::state::{EventLogKind, RecordState};
+use super::state::{EventLogKind, RecordState, SceneTrack};
 use super::RobsController;
 use robs_core::scene::CaptureSource;
 use std::fs;
@@ -20,6 +20,28 @@ use std::process::Stdio;
 /// 30fps), leaving clip starts landing far before their marks.
 pub(crate) fn gop_size(fps: f32, keyframe_interval: u32) -> u32 {
     ((fps * keyframe_interval as f32) as u32).max(1)
+}
+
+/// Filesystem-safe scene name for ISO output files: keep alphanumeric
+/// characters, spaces, dashes, and underscores; everything else becomes
+/// `_` one-for-one. A whitespace-only name collapses to a single `_`.
+pub(crate) fn sanitize_scene_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "_".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Date-folder name for a recording session: `DD_MM_YYYY` of the recording's
@@ -110,6 +132,13 @@ impl RecordService {
                 clip_export_rx: None,
                 clip_export_pending: 0,
                 clip_marking_supported: false,
+                tape_no: String::new(),
+                session_tape_no: String::new(),
+                last_tape_no: String::new(),
+                merge_result_tx: None,
+                merge_result_rx: None,
+                merge_pending: 0,
+                scene_tracks: Vec::new(),
             },
         }
     }
@@ -151,8 +180,6 @@ impl RecordService {
         config: &SessionConfig,
         target: &CaptureTarget,
     ) -> Result<(), String> {
-        let encoder = config.encoder;
-
         // Build FFmpeg args based on format
         let format = &config.format;
         let mut ffmpeg_args = Vec::new();
@@ -231,48 +258,9 @@ impl RecordService {
         // NOTE: Audio disabled for now - dshow audio is a live stream that never ends,
         // causing FFmpeg to hang indefinitely. Will re-add with proper -shortest handling.
 
-        // Video codec
-        ffmpeg_args.push("-c:v".into());
-        ffmpeg_args.push(encoder.to_string());
-
-        // NVENC-specific settings (matching OBS: CBR, HQ tuning, 2-pass)
-        if encoder == "h264_nvenc" {
-            ffmpeg_args.push("-preset".into());
-            ffmpeg_args.push("p4".into());
-            ffmpeg_args.push("-tune".into());
-            ffmpeg_args.push("hq".into()); // High Quality (OBS default, not low-latency)
-            ffmpeg_args.push("-gpu".into());
-            ffmpeg_args.push("0".into());
-            ffmpeg_args.push("-rc".into());
-            ffmpeg_args.push("cbr".into());
-            ffmpeg_args.push("-b:v".into());
-            ffmpeg_args.push(format!("{}k", config.bitrate_kbps));
-            ffmpeg_args.push("-maxrate".into());
-            ffmpeg_args.push(format!("{}k", config.bitrate_kbps));
-            ffmpeg_args.push("-bufsize".into());
-            ffmpeg_args.push(format!("{}k", config.bitrate_kbps * 2));
-            // Keyframe interval (gop size = fps * keyframe_interval)
-            ffmpeg_args.push("-g".into());
-            ffmpeg_args.push(gop_size(config.fps, config.keyframe_interval).to_string());
-            // Two-pass multipass encoding (quarter resolution for first pass)
-            ffmpeg_args.push("-multipass".into());
-            ffmpeg_args.push("fullres".into());
-        } else {
-            // x264 settings
-            ffmpeg_args.push("-preset".into());
-            ffmpeg_args.push("fast".into());
-            ffmpeg_args.push("-tune".into());
-            ffmpeg_args.push("zerolatency".into());
-            ffmpeg_args.push("-crf".into());
-            ffmpeg_args.push("23".into());
-            // Same keyframe cadence as NVENC (see `gop_size` above).
-            ffmpeg_args.push("-g".into());
-            ffmpeg_args.push(gop_size(config.fps, config.keyframe_interval).to_string());
-        }
-
-        // Frame rate
-        ffmpeg_args.push("-r".into());
-        ffmpeg_args.push(config.fps.to_string());
+        // Video codec + encoder settings + frame rate (shared with the
+        // per-scene ISO tracks).
+        push_encoder_args(&mut ffmpeg_args, config);
 
         // Output format and overwrite
         if format == "mp4" {
@@ -416,6 +404,146 @@ impl RecordService {
         Ok(())
     }
 
+    /// Spawn one per-scene ISO recording track: an FFmpeg child that always
+    /// consumes piped rawvideo BGRA at output resolution — the controller
+    /// scales the scene's warm preview texture each tick and feeds the
+    /// channel, so even window-capture scenes record through this pipe
+    /// (no per-scene gdigrab). Encoder settings match the main recording.
+    pub(crate) fn launch_scene_ffmpeg(
+        &mut self,
+        config: &SessionConfig,
+        scene_name: &str,
+        output_path: &str,
+    ) {
+        let mut args: Vec<String> = vec![
+            "-f".into(),
+            "rawvideo".into(),
+            "-pix_fmt".into(),
+            "bgra".into(),
+            "-video_size".into(),
+            format!("{}x{}", config.output_width, config.output_height),
+            "-framerate".into(),
+            config.fps.to_string(),
+            "-i".into(),
+            "pipe:0".into(),
+        ];
+        push_encoder_args(&mut args, config);
+
+        // Output format and overwrite (same container rules as the main
+        // recorder).
+        if config.format == "mp4" {
+            args.push("-f".into());
+            args.push("mp4".into());
+        } else if config.format == "mkv" {
+            args.push("-f".into());
+            args.push("matroska".into());
+        } else if config.format == "flv" {
+            args.push("-f".into());
+            args.push("flv".into());
+        }
+        args.push("-y".into());
+        args.push(output_path.to_string());
+
+        eprintln!(
+            "[ISO] Starting FFmpeg for scene '{scene_name}' -> {output_path}",
+        );
+        let Ok(mut child) = std::process::Command::new("ffmpeg")
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        else {
+            eprintln!("[ISO] Failed to start FFmpeg for scene '{scene_name}'");
+            return;
+        };
+
+        // Writer thread: drain the frame channel into FFmpeg's stdin (same
+        // pattern as the main recorder; the shared session stop flag ends
+        // the loop when recording stops).
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let stop_flag = self.recording_stop_flag.clone();
+        let stdin = child.stdin.take().expect("FFmpeg stdin should be piped");
+        let scene = scene_name.to_string();
+        let writer = std::thread::spawn(move || {
+            let mut stdin = stdin;
+            let mut frames: u64 = 0;
+            while !stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(frame) => {
+                        if std::io::Write::write_all(&mut stdin, &frame).is_err() {
+                            break;
+                        }
+                        frames += 1;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            eprintln!("[ISO] Writer for scene '{scene}' exiting after {frames} frames");
+        });
+
+        self.scene_tracks.push(SceneTrack {
+            scene_name: scene_name.to_string(),
+            output_path: output_path.to_string(),
+            frame_sender: Some(tx),
+            writer: Some(writer),
+            child: Some(child),
+            last_frame_time: None,
+        });
+    }
+
+    /// Finalize every ISO track after the main pipeline shut down (the
+    /// shared session stop flag is already set by `shutdown_pipeline`):
+    /// drop each sender (EOF), join the writer, then wait for the child —
+    /// killing it after a 10s grace. Returns per-track
+    /// `(scene name, output path, finalized cleanly)` summaries and clears
+    /// the tracks.
+    pub(crate) fn shutdown_scene_tracks(&mut self) -> Vec<(String, String, bool)> {
+        let mut summaries = Vec::new();
+        for track in self.scene_tracks.iter_mut() {
+            track.frame_sender = None;
+            if let Some(writer) = track.writer.take() {
+                let _ = writer.join();
+            }
+            let mut finalized_cleanly = false;
+            if let Some(mut child) = track.child.take() {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            finalized_cleanly = status.success();
+                            break;
+                        }
+                        Ok(None) => {
+                            // Kill ONLY this child — never a broad ffmpeg
+                            // sweep, which would take down the sibling
+                            // ISO tracks.
+                            if std::time::Instant::now() > deadline {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            eprintln!(
+                "[ISO] Scene '{}' finalized (clean: {}) -> {}",
+                track.scene_name, finalized_cleanly, track.output_path
+            );
+            summaries.push((
+                std::mem::take(&mut track.scene_name),
+                std::mem::take(&mut track.output_path),
+                finalized_cleanly,
+            ));
+        }
+        self.scene_tracks.clear();
+        summaries
+    }
+
     /// Flip the session state to "recording": zero the timers and frame
     /// counter, reset clip-mark state, and note whether marks are supported
     /// this session (only on the piped pipeline, where `frame_count` anchors
@@ -542,12 +670,67 @@ impl RecordService {
         self.recording_dxgi_thread = None;
         self.recording_frame_sender = None;
         self.ffmpeg_recording_handle = None;
+        // ISO tracks are torn down by `shutdown_scene_tracks` before this
+        // runs; the clear here is a safety net for early-abort paths.
+        self.scene_tracks.clear();
+        // The taped blackbox session is over; channels started after this
+        // run untaped (a NEW session gets a fresh number from the input).
+        self.session_tape_no = String::new();
         self.recording = false;
         self.recording_paused = false;
         let elapsed = self.recording_time / 1000; // ms → s
         self.recording_time = 0;
         elapsed
     }
+}
+
+/// Codec + encoder settings + frame rate args shared by the main recorder
+/// and the per-scene ISO tracks (NVENC CBR/HQ or x264 zerolatency, plus the
+/// GOP cadence so clip-cut snapping matches on both).
+fn push_encoder_args(args: &mut Vec<String>, config: &SessionConfig) {
+    let encoder = config.encoder;
+
+    args.push("-c:v".into());
+    args.push(encoder.to_string());
+
+    // NVENC-specific settings (matching OBS: CBR, HQ tuning, 2-pass)
+    if encoder == "h264_nvenc" {
+        args.push("-preset".into());
+        args.push("p4".into());
+        args.push("-tune".into());
+        args.push("hq".into()); // High Quality (OBS default, not low-latency)
+        args.push("-gpu".into());
+        args.push("0".into());
+        args.push("-rc".into());
+        args.push("cbr".into());
+        args.push("-b:v".into());
+        args.push(format!("{}k", config.bitrate_kbps));
+        args.push("-maxrate".into());
+        args.push(format!("{}k", config.bitrate_kbps));
+        args.push("-bufsize".into());
+        args.push(format!("{}k", config.bitrate_kbps * 2));
+        // Keyframe interval (gop size = fps * keyframe_interval)
+        args.push("-g".into());
+        args.push(gop_size(config.fps, config.keyframe_interval).to_string());
+        // Two-pass multipass encoding (quarter resolution for first pass)
+        args.push("-multipass".into());
+        args.push("fullres".into());
+    } else {
+        // x264 settings
+        args.push("-preset".into());
+        args.push("fast".into());
+        args.push("-tune".into());
+        args.push("zerolatency".into());
+        args.push("-crf".into());
+        args.push("23".into());
+        // Same keyframe cadence as NVENC (see `gop_size` above).
+        args.push("-g".into());
+        args.push(gop_size(config.fps, config.keyframe_interval).to_string());
+    }
+
+    // Frame rate
+    args.push("-r".into());
+    args.push(config.fps.to_string());
 }
 
 impl std::ops::Deref for RecordService {
@@ -623,19 +806,27 @@ impl RobsController {
         };
         let session = self.record.plan_session(&config, now);
 
-        // Redirect the always-on blackbox into the session folder: stopping
-        // it now lets the per-tick `sync_blackbox_engine` restart it within
-        // one tick with the new output dir — the current segment closes
-        // cleanly and the next one lands in `<session>/Blackbox`.
+        // Tape number: sanitized once per session. As the blackbox channels
+        // (re)start under this session they embed it in their `tape.json`
+        // manifests — the marker the tape merge discovers footage by. The
+        // last used number seeds the input for the next session.
+        let tape_input = self.record.tape_no.trim().to_string();
+        self.record.session_tape_no = if tape_input.is_empty() {
+            String::new()
+        } else {
+            sanitize_scene_name(&tape_input)
+        };
+        self.record.last_tape_no = self.record.session_tape_no.clone();
+
+        // Redirect the always-on blackbox channels into the session folder
+        // (`<session>/Blackbox/<Scene>`): stopping them now lets the per-tick
+        // `sync_blackbox_engine` restart each one within a tick with the new
+        // output dir — current segments close cleanly and the next ones land
+        // inside the session, manifest included when a tape number was set.
         let blackbox_dir = session.join("Blackbox");
         fs::create_dir_all(&blackbox_dir).ok();
-        self.blackbox.session_override = Some(blackbox_dir);
-        if self
-            .blackbox
-            .engine
-            .as_ref()
-            .is_some_and(|engine| engine.is_running())
-        {
+        self.blackbox.begin_session(blackbox_dir);
+        if self.blackbox.any_running() {
             self.stop_blackbox();
         }
 
@@ -760,6 +951,59 @@ impl RobsController {
         self.record.begin_session_state(!use_window_capture);
         // Never duplicate a stale frame from a previous session into this one.
         self.preview.last_output_frame = None;
+
+        // ---- Per-scene ISO tracks: every OTHER scene with a visible
+        // capture source gets its own clean-feed recording (no overlays),
+        // fed from the warm per-scene preview textures. The main file above
+        // stays the current scene's composed output — with N scenes this
+        // session produces exactly N files. Tracks are fixed at start.
+        {
+            let current = self.scenes.current_scene_name().unwrap_or("").to_string();
+            let mut names: Vec<String> =
+                self.scenes.list().iter().map(|s| s.to_string()).collect();
+            names.sort();
+            let timestamp = now.format("%Y-%m-%d %H-%M-%S").to_string();
+            for name in &names {
+                if *name == current {
+                    continue;
+                }
+                let has_capture = self
+                    .scenes
+                    .get(name)
+                    .is_some_and(|scene| {
+                        scene
+                            .items()
+                            .iter()
+                            .any(|i| i.is_visible() && i.capture().is_some())
+                    });
+                if !has_capture {
+                    self.log_event(
+                        format!(
+                            "ISO recording skipped for scene \"{name}\": no visible capture source"
+                        ),
+                        EventLogKind::Record,
+                    );
+                    continue;
+                }
+                let filename = format!(
+                    "ROBS_{}_{}.{}",
+                    timestamp,
+                    sanitize_scene_name(name),
+                    config.format
+                );
+                let path = self
+                    .record
+                    .session_dir
+                    .as_ref()
+                    .map(|dir| dir.join(&filename).to_string_lossy().into_owned())
+                    .unwrap_or_else(|| filename.clone());
+                self.record.launch_scene_ffmpeg(&config, name, &path);
+                self.log_event(
+                    format!("ISO recording started for scene \"{name}\": {path}"),
+                    EventLogKind::Record,
+                );
+            }
+        }
         self.record.recording_start_time = Some(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -798,6 +1042,31 @@ impl RobsController {
             } else {
                 self.log_event(
                     "Recording finalized abnormally; clip marks skipped \u{2014} file may be unplayable",
+                    EventLogKind::Record,
+                );
+            }
+        }
+
+        // 4b-bis. Per-scene ISO tracks: finalize each child and report the
+        // files. Runs after the main pipeline's shutdown (the shared stop
+        // flag is already set) and before the state reset.
+        for (scene, path, clean) in self.record.shutdown_scene_tracks() {
+            let exists = std::path::Path::new(&path).exists();
+            if clean && exists {
+                let size_mb = fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64
+                    / 1_048_576.0;
+                println!("[ISO] Scene '{scene}' saved to {path} ({size_mb:.2} MB)");
+                self.log_event(
+                    format!(
+                        "Scene recording saved: \"{scene}\" -> {path} ({size_mb:.2} MB)"
+                    ),
+                    EventLogKind::Record,
+                );
+            } else {
+                self.log_event(
+                    format!(
+                        "Scene recording for \"{scene}\" ended abnormally: {path}"
+                    ),
                     EventLogKind::Record,
                 );
             }
@@ -851,13 +1120,7 @@ impl RobsController {
         // resumes in its normal location — blackbox via the next tick's sync,
         // the anomaly buffer via an explicit restart (only when it is
         // actually running; a buffer the user stopped stays stopped).
-        if self.blackbox.session_override.take().is_some()
-            && self
-                .blackbox
-                .engine
-                .as_ref()
-                .is_some_and(|engine| engine.is_running())
-        {
+        if self.blackbox.end_session() {
             self.stop_blackbox();
         }
         if self.anomaly.session_override.take().is_some()
@@ -882,6 +1145,25 @@ mod tests {
     use super::{date_folder_name, gop_size, pick_session_dir};
     use std::collections::HashSet;
     use std::path::PathBuf;
+
+    #[test]
+    fn sanitize_keeps_safe_characters() {
+        assert_eq!(super::sanitize_scene_name("Main Scene"), "Main Scene");
+        assert_eq!(super::sanitize_scene_name("Port-A_1"), "Port-A_1");
+    }
+
+    #[test]
+    fn sanitize_replaces_unsafe_characters() {
+        assert_eq!(super::sanitize_scene_name("A/B:*C?"), "A_B__C_");
+        assert_eq!(super::sanitize_scene_name("\"quote<>"), "_quote__");
+    }
+
+    #[test]
+    fn sanitize_collapses_to_underscore_when_empty() {
+        assert_eq!(super::sanitize_scene_name("///"), "___");
+        assert_eq!(super::sanitize_scene_name("   "), "_");
+        assert_eq!(super::sanitize_scene_name(""), "_");
+    }
 
     #[test]
     fn gop_size_matches_fps_times_interval() {

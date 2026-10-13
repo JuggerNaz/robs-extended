@@ -974,6 +974,22 @@ export component MainWindow inherits Window {
             // Centered under the stage like the mockup.
             alignment: center;
 
+            // Tape number: applied to the session at START (the blackbox
+            // channels tag their footage with it for the tape merge).
+            Text {
+                text: "TAPE";
+                font-size: Theme.font-xs;
+                font-weight: 700;
+                letter-spacing: 1px;
+                color: Theme.text-dim;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                width: 92px;
+                height: 36px;
+                text <=> PanelsApi.tape-no;
+                placeholder-text: "Tape No.";
+            }
             QuickButton {
                 icon: !Api.recording || Api.recording-paused ? "play" : "pause";
                 label: !Api.recording ? "START" : (Api.recording-paused ? "RESUME" : "PAUSE");

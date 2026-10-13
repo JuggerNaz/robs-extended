@@ -24,6 +24,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use robs_chat::message::UnifiedChatMessage;
 use robs_controller::devices::get_audio_devices;
+use robs_controller::merge::TapeEntry;
 use robs_controller::state::{AudioChannel, AudioDeviceInfo, EventLogKind};
 use robs_controller::RobsController;
 use robs_core::ProfileId;
@@ -57,6 +58,17 @@ pub struct PanelsUi {
     /// `chat_messages.len()` at the last chat-model push.
     chat_len: usize,
     seeded: bool,
+    /// Tape list behind the `bb-tapes` ComboBox model; merge callbacks
+    /// resolve an index into this (labels were built at push time).
+    bb_tapes_snapshot: Vec<TapeEntry>,
+    /// Label list at the last tapes push (change detection).
+    bb_tapes_mirror: Vec<String>,
+    /// `bb-merge-busy` value at the last push; the busy→idle edge refreshes
+    /// the tape list.
+    merge_busy_mirror: bool,
+    /// Whether the Quick Actions tape input was seeded from `last_tape_no`
+    /// (seed once, then the input is user-owned).
+    seeded_tape: bool,
     pref_confirm_on_exit: bool,
     pref_minimize_to_tray: bool,
     pref_always_on_top: bool,
@@ -94,6 +106,10 @@ impl PanelsUi {
             audio_mirror: Vec::new(),
             chat_len: 0,
             seeded: false,
+            bb_tapes_snapshot: Vec::new(),
+            bb_tapes_mirror: Vec::new(),
+            merge_busy_mirror: false,
+            seeded_tape: false,
             pref_confirm_on_exit: true,
             pref_minimize_to_tray: false,
             pref_always_on_top: false,
@@ -264,9 +280,14 @@ pub fn install(
             let api = root.global::<PanelsApi>();
             // Re-seed on every open so the widgets show the live engine
             // values (the egui window was rebuilt from state each frame).
-            let st = state.borrow();
-            seed_settings(&api, &controller.borrow(), &st);
+            {
+                let st = state.borrow();
+                seed_settings(&api, &controller.borrow(), &st);
+            }
             api.set_settings_open(true);
+            // Fresh tape list for the Blackbox page on every open.
+            let tapes = controller.borrow().list_tapes();
+            push_tapes(&api, &mut state.borrow_mut(), tapes);
         });
     }
     {
@@ -372,6 +393,46 @@ pub fn install(
             controller.borrow_mut().stop_blackbox();
         });
     }
+    // ---- Blackbox tapes (discovery + merge) ----
+    {
+        let weak = component.clone();
+        let controller = Rc::clone(controller);
+        let state = Rc::clone(state);
+        api.on_refresh_tapes(move || {
+            let tapes = controller.borrow().list_tapes();
+            if let Some(root) = weak.upgrade() {
+                push_tapes(&root.global::<PanelsApi>(), &mut state.borrow_mut(), tapes);
+            }
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        let state = Rc::clone(state);
+        api.on_merge_tape(move |index: i32| {
+            let entry = state
+                .borrow()
+                .bb_tapes_snapshot
+                .get(index.max(0) as usize)
+                .cloned();
+            if let Some(entry) = entry {
+                controller.borrow_mut().merge_tape(entry);
+            }
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        let state = Rc::clone(state);
+        api.on_merge_tape_all(move |index: i32| {
+            let tape_no = state
+                .borrow()
+                .bb_tapes_snapshot
+                .get(index.max(0) as usize)
+                .map(|e| e.tape_no.clone());
+            if let Some(tape_no) = tape_no {
+                controller.borrow_mut().merge_tape_all(&tape_no);
+            }
+        });
+    }
     {
         let controller = Rc::clone(controller);
         api.on_toggle_anomaly_engine(move || {
@@ -417,6 +478,22 @@ pub fn install(
     });
     // `undo`, `redo`, `about`, and `send-chat` are no-ops, exactly like
     // their egui counterparts; no registration is needed.
+}
+
+/// Push the discovered tape list into the ComboBox model, selecting the
+/// first entry when the labels changed. The snapshot stays in `PanelsUi` so
+/// the merge callbacks can resolve an index back to an entry.
+fn push_tapes(api: &PanelsApi, state: &mut PanelsUi, tapes: Vec<TapeEntry>) {
+    let labels: Vec<String> = tapes.iter().map(|t| t.label()).collect();
+    if labels == state.bb_tapes_mirror {
+        return;
+    }
+    state.bb_tapes_mirror = labels.clone();
+    state.bb_tapes_snapshot = tapes;
+    api.set_bb_tapes(ModelRc::new(VecModel::from(
+        labels.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+    )));
+    api.set_bb_tapes_index(if state.bb_tapes_snapshot.is_empty() { -1 } else { 0 });
 }
 
 /// Port of `RobsApp::export_event_log_pdf`. Entries are copied out and the
@@ -674,6 +751,33 @@ pub fn push(component: &MainWindow, controller: &mut RobsController, state: &mut
     }
 
     apply_settings_drift(&api, controller, state);
+
+    // Tape number (Quick Actions input): seed once from the last used
+    // number, then follow the user's edits into the engine each tick (the
+    // value is applied to the session at recording start).
+    if !state.seeded_tape {
+        state.seeded_tape = true;
+        api.set_tape_no(controller.record.last_tape_no.as_str().into());
+    }
+    controller.record.tape_no = api.get_tape_no().trim().to_string();
+
+    // Tape merges: a busy line while jobs run; when the last one finishes,
+    // refresh the list so merge outcomes / discovery changes show up.
+    let merge_busy = controller.record.merge_pending > 0;
+    if merge_busy != state.merge_busy_mirror {
+        let finished = state.merge_busy_mirror && !merge_busy;
+        state.merge_busy_mirror = merge_busy;
+        api.set_bb_merge_busy(merge_busy);
+        if finished {
+            push_tapes(&api, state, controller.list_tapes());
+        }
+    }
+    api.set_bb_merge_status(if merge_busy {
+        format!("Merging {} job(s)\u{2026}", controller.record.merge_pending).into()
+    } else {
+        "Idle".into()
+    });
+
     push_audio(&api, state);
     push_chat(&api, controller, state);
     push_profiles(&api, state);
@@ -800,21 +904,14 @@ fn push_status(api: &PanelsApi, controller: &RobsController) {
     api.set_stats_dropped(format!("{}", controller.dropped_frames).into());
     api.set_log_label(format!("EVENT LOG ({})", controller.event_log.len()).into());
 
-    // Blackbox chip: disabled / idle / disk-paused (warn) / recording (good).
+    // Blackbox chip: disabled / idle / per-channel recording lines, from
+    // the service's aggregate across channels.
     let bb = &controller.blackbox;
-    let bb_running = bb.engine.as_ref().is_some_and(|e| e.is_running());
-    let (bb_text, bb_state) = if !bb.enabled {
-        ("disabled", 0)
-    } else if !bb_running {
-        ("idle (no capture source)", 0)
-    } else if bb.status.disk_paused {
-        ("disk full — ingestion paused", 2)
-    } else {
-        ("recording", 1)
-    };
+    let bb_running = bb.any_running();
+    let (bb_text, bb_state) = bb.status_summary();
     api.set_bb_status(bb_text.into());
     api.set_bb_status_state(bb_state);
-    api.set_bb_last_error(bb.status.last_error.as_deref().unwrap_or("").into());
+    api.set_bb_last_error(bb.first_error().as_deref().unwrap_or("").into());
     api.set_bb_engine_running(bb_running);
 
     // Anomaly chip: stopped / running (waiting for frames) / buffering.

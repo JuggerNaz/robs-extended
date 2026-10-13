@@ -99,6 +99,33 @@ component ActionButton inherits Rectangle {
     }
 }
 
+// Header close button with a drawn X — the shell font renders U+2715 as
+// tofu (same reason scene_dialog.slint draws its icons as Path strokes).
+component CloseButton inherits Rectangle {
+    callback clicked();
+
+    width: 26px;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover ? Theme.accent-hover : Theme.accent;
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 10px;
+        height: 10px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: "M 0 0 L 10 10 M 10 0 L 0 10";
+        stroke: white;
+        stroke-width: 1.5px;
+        fill: transparent;
+    }
+}
+
 // Status line next to a "Status:" label; state: 0 neutral / 1 good / 2 warn.
 component StatusText inherits Text {
     in property <int> state;
@@ -490,6 +517,46 @@ component BlackboxPage inherits VerticalLayout {
         text: "Last error: " + PanelsApi.bb-last-error;
         color: #C85A5A;
     }
+    Separator { }
+    Heading { text: "Tapes"; }
+    Note {
+        text: "Type a tape number in the bar next to START before recording: every camera's blackbox segments of that session are tagged with it and can be merged here into single files (lossless stream copy).";
+    }
+    CfgRow {
+        label: "Tape:";
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+            ComboBox {
+                width: 320px;
+                model: PanelsApi.bb-tapes;
+                current-index <=> PanelsApi.bb-tapes-index;
+                enabled: PanelsApi.bb-tapes.length > 0;
+            }
+            ActionButton {
+                label: "Merge";
+                width: 80px;
+                enabled: PanelsApi.bb-tapes.length > 0 && !PanelsApi.bb-merge-busy;
+                clicked => { PanelsApi.merge-tape(PanelsApi.bb-tapes-index); }
+            }
+            ActionButton {
+                label: "Merge All Cameras";
+                width: 150px;
+                enabled: PanelsApi.bb-tapes.length > 0 && !PanelsApi.bb-merge-busy;
+                clicked => { PanelsApi.merge-tape-all(PanelsApi.bb-tapes-index); }
+            }
+            ActionButton {
+                label: "Refresh";
+                width: 90px;
+                clicked => { PanelsApi.refresh-tapes(); }
+            }
+        }
+    }
+    Text {
+        text: PanelsApi.bb-merge-status;
+        font-size: Theme.font-sm;
+        color: Theme.text-dim;
+        height: 20px;
+    }
     Note {
         text: "Most changes take effect on the next capture start. Toggling Enable applies immediately. Container is fixed to mkv for crash-safety.";
     }
@@ -635,68 +702,79 @@ export component SettingsWindow inherits Rectangle {
 
             property <int> active-tab: 0;
 
-            VerticalLayout {
-                padding: Theme.spacing-md;
+            // Header, separator, and content are positioned explicitly.
+            // An all-layout version clipped the content pane at the tab
+            // column's natural height (8 × 26px + spacing): Slint merges a
+            // layout child's constraints with max = min-of-children, so the
+            // fixed-height tab column capped the row's max-height and no
+            // amount of vertical-stretch could grow it into the leftover
+            // card space. Explicit geometry sidesteps constraint merging.
+            HorizontalLayout {
+                x: Theme.spacing-md;
+                y: Theme.spacing-md;
+                width: parent.width - 2 * Theme.spacing-md;
+                height: 26px;
                 spacing: Theme.spacing-sm;
-
-                HorizontalLayout {
-                    height: 26px;
-                    spacing: Theme.spacing-sm;
-                    Text {
-                        horizontal-stretch: 1;
-                        text: "Settings";
-                        font-size: Theme.font-lg;
-                        color: Theme.text;
-                        vertical-alignment: center;
-                    }
-                    ActionButton {
-                        label: "\u{2715}";
-                        width: 28px;
-                        clicked => { PanelsApi.settings-closed(); }
-                    }
+                Text {
+                    horizontal-stretch: 1;
+                    text: "Settings";
+                    font-size: Theme.font-lg;
+                    color: Theme.text;
+                    vertical-alignment: center;
                 }
-                Separator { }
+                CloseButton {
+                    clicked => { PanelsApi.settings-closed(); }
+                }
+            }
+            Separator {
+                x: Theme.spacing-md;
+                y: Theme.spacing-md + 26px + Theme.spacing-sm;
+                width: parent.width - 2 * Theme.spacing-md;
+            }
 
-                HorizontalLayout {
-                    spacing: Theme.spacing-md;
+            // Right content pane fills everything below the separator.
+            HorizontalLayout {
+                x: Theme.spacing-md;
+                y: Theme.spacing-md + 26px + Theme.spacing-sm + 1px + Theme.spacing-sm;
+                width: parent.width - 2 * Theme.spacing-md;
+                height: parent.height - self.y - Theme.spacing-md;
+                spacing: Theme.spacing-md;
 
-                    // Left tab column.
-                    VerticalLayout {
-                        width: 140px;
-                        spacing: 2px;
-                        TabItem { label: "General"; active: card.active-tab == 0; selected => { card.active-tab = 0; } }
-                        TabItem { label: "Video"; active: card.active-tab == 1; selected => { card.active-tab = 1; } }
-                        TabItem { label: "Audio"; active: card.active-tab == 2; selected => { card.active-tab = 2; } }
-                        TabItem { label: "Hotkeys"; active: card.active-tab == 3; selected => { card.active-tab = 3; } }
-                        TabItem { label: "Streaming"; active: card.active-tab == 4; selected => { card.active-tab = 4; } }
-                        TabItem { label: "Outputs"; active: card.active-tab == 5; selected => { card.active-tab = 5; } }
-                        TabItem { label: "Blackbox"; active: card.active-tab == 6; selected => { card.active-tab = 6; } }
-                        TabItem { label: "Anomaly"; active: card.active-tab == 7; selected => { card.active-tab = 7; } }
-                    }
+                // Left tab column.
+                VerticalLayout {
+                    width: 140px;
+                    spacing: 2px;
+                    TabItem { label: "General"; active: card.active-tab == 0; selected => { card.active-tab = 0; } }
+                    TabItem { label: "Video"; active: card.active-tab == 1; selected => { card.active-tab = 1; } }
+                    TabItem { label: "Audio"; active: card.active-tab == 2; selected => { card.active-tab = 2; } }
+                    TabItem { label: "Hotkeys"; active: card.active-tab == 3; selected => { card.active-tab = 3; } }
+                    TabItem { label: "Streaming"; active: card.active-tab == 4; selected => { card.active-tab = 4; } }
+                    TabItem { label: "Outputs"; active: card.active-tab == 5; selected => { card.active-tab = 5; } }
+                    TabItem { label: "Blackbox"; active: card.active-tab == 6; selected => { card.active-tab = 6; } }
+                    TabItem { label: "Anomaly"; active: card.active-tab == 7; selected => { card.active-tab = 7; } }
+                }
 
-                    // Right content pane.
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        Flickable {
-                            x: 0;
-                            y: 0;
-                            width: parent.width;
-                            height: parent.height;
-                            viewport-height: page.preferred-height;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    Flickable {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        viewport-height: page.preferred-height;
 
-                            page := VerticalLayout {
-                                width: parent.width - 12px;
-                                spacing: Theme.spacing-sm;
+                        page := VerticalLayout {
+                            width: parent.width - 12px;
+                            spacing: Theme.spacing-sm;
 
-                                if card.active-tab == 0: GeneralPage { }
-                                if card.active-tab == 1: VideoPage { }
-                                if card.active-tab == 2: AudioPage { }
-                                if card.active-tab == 3: HotkeysPage { }
-                                if card.active-tab == 4: StreamingPage { }
-                                if card.active-tab == 5: OutputsPage { }
-                                if card.active-tab == 6: BlackboxPage { }
-                                if card.active-tab == 7: AnomalyPage { }
-                            }
+                            if card.active-tab == 0: GeneralPage { }
+                            if card.active-tab == 1: VideoPage { }
+                            if card.active-tab == 2: AudioPage { }
+                            if card.active-tab == 3: HotkeysPage { }
+                            if card.active-tab == 4: StreamingPage { }
+                            if card.active-tab == 5: OutputsPage { }
+                            if card.active-tab == 6: BlackboxPage { }
+                            if card.active-tab == 7: AnomalyPage { }
                         }
                     }
                 }
