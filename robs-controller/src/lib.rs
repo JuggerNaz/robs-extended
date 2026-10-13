@@ -17,6 +17,7 @@ mod anomaly;
 mod blackbox;
 mod capture;
 mod clips;
+pub mod merge;
 pub mod db;
 mod overlay;
 pub mod qid;
@@ -104,8 +105,10 @@ pub struct RobsController {
     pub snapshot_flash: Option<std::time::Instant>,
     // Text overlays (persistent on-screen text baked into recordings).
     pub text_overlays: Vec<robs_core::TextOverlay>,
-    // Always-on background safety recorder. Service owning the
-    // `BlackboxState` cluster (field access flows through `Deref`).
+    // Always-on background safety recorder — one channel per scene with a
+    // visible capture source (multi-channel; see `blackbox.rs`). The service
+    // exposes `enabled` / `settings` as plain public fields; channels are
+    // internal and reached through its methods.
     pub blackbox: BlackboxService,
     // User-toggled short-clip anomaly capture buffer. Service owning the
     // `AnomalyState` cluster (field access flows through `Deref`).
@@ -319,13 +322,20 @@ impl RobsController {
             })
             .unwrap_or(false);
 
-        // Start/stop the always-on Blackbox engine based on capture state.
-        // Done before process_preview_frames so the engine is guaranteed to
-        // be running when the per-frame tap fires.
-        self.sync_blackbox_engine(has_capture_source);
+        // Start/stop the always-on Blackbox channels based on capture state
+        // (one channel per scene with a visible capture source). Done before
+        // process_preview_frames so the engines are guaranteed to be running
+        // when the per-frame taps fire.
+        self.sync_blackbox_engine();
 
         // Process preview frames (recording + blackbox tap hook into this).
         self.process_preview_frames();
+
+        // Feed the per-scene ISO recording tracks. Runs every tick (not
+        // inside `process_preview_frames`, whose preview rate-limiter
+        // early-returns would halve the ISO cadence); per-track pacing
+        // keeps each encoder at the target fps.
+        self.feed_scene_recorders();
 
         // Encoders timestamp piped frames at a FIXED framerate, and the preview
         // must stay live while a capture source exists. The UI is otherwise
@@ -445,6 +455,19 @@ impl RobsController {
         // their results surface promptly (replaces the export thread's old
         // repaint request; cadence matches the 100 ms above).
         if self.record.clip_export_pending > 0 {
+            wake = min_wake(wake, std::time::Duration::from_millis(100));
+        }
+
+        // Drain tape-merge results from the background ffmpeg threads: log
+        // each merged/failed channel and release its busy slot.
+        let merge_results = self.drain_merge_events();
+        if !merge_results.is_empty() {
+            self.apply_merge_events(merge_results);
+            wake = min_wake(wake, std::time::Duration::from_millis(100));
+        }
+        // While merges are still running, keep ticking so their results
+        // surface promptly.
+        if self.record.merge_pending > 0 {
             wake = min_wake(wake, std::time::Duration::from_millis(100));
         }
 

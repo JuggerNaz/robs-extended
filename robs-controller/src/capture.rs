@@ -378,13 +378,20 @@ impl RobsController {
         let current_name = self.scenes.current_scene_name().map(str::to_string);
         let mut scene_names: Vec<String> = self.scenes.scenes().keys().cloned().collect();
         scene_names.sort();
-        let mut capture_items: Vec<(SceneItemId, CaptureSource, bool)> = Vec::new();
+        let mut capture_items: Vec<(SceneItemId, CaptureSource, String, bool)> = Vec::new();
+        // First visible capture item per scene: the frame that feeds that
+        // scene's blackbox channel (the ISO scene recorders apply the same
+        // rule). Scenes with several visible sources contribute only their
+        // first one.
+        let mut primary_by_scene: std::collections::HashMap<String, SceneItemId> =
+            std::collections::HashMap::new();
         if let Some(name) = &current_name {
             if let Some(scene) = self.scenes.get(name) {
                 for item in scene.items() {
                     if item.is_visible() {
                         if let Some(capture) = item.capture() {
-                            capture_items.push((item.id(), capture.clone(), true));
+                            primary_by_scene.entry(name.clone()).or_insert(item.id());
+                            capture_items.push((item.id(), capture.clone(), name.clone(), true));
                         }
                     }
                 }
@@ -400,7 +407,8 @@ impl RobsController {
             for item in scene.items() {
                 if item.is_visible() {
                     if let Some(capture) = item.capture() {
-                        capture_items.push((item.id(), capture.clone(), false));
+                        primary_by_scene.entry(name.clone()).or_insert(item.id());
+                        capture_items.push((item.id(), capture.clone(), name.clone(), false));
                     }
                 }
             }
@@ -428,7 +436,7 @@ impl RobsController {
         // that monitor (an earlier bug re-captured the same output per item).
         let mut display_cache: std::collections::HashMap<(i32, i32), Option<(Vec<u8>, u32, u32)>> =
             std::collections::HashMap::new();
-        for (item_id, capture, is_current) in &capture_items {
+        for (item_id, capture, scene, is_current) in &capture_items {
             let texture_key = *item_id;
 
             // Resolve a fresh frame for this source based on its typed metadata.
@@ -468,14 +476,17 @@ impl RobsController {
             };
 
             if let Some((data, width, height)) = frame {
+                // Blackbox tap: EVERY scene's primary capture frame feeds that
+                // scene's always-on channel (multi-channel blackbox), BEFORE the
+                // preview path swaps it to RGBA (ffmpeg consumes BGRA natively).
+                // Non-blocking; no-op without a running engine.
+                if primary_by_scene.get(scene) == Some(item_id) {
+                    self.submit_blackbox_frame(scene, &data, width, height);
+                }
                 if *is_current {
-                    // Blackbox tap: feed the raw BGRA frame to the always-on safety
-                    // recorder BEFORE the preview path swaps it to RGBA (ffmpeg
-                    // consumes BGRA natively). Non-blocking; no-op without an engine.
-                    self.submit_blackbox_frame(&data, width, height);
                     // Anomaly tap: same raw BGRA frame, fed to the (user-toggled)
-                    // rolling buffer for on-demand clip capture. Non-blocking; no-op
-                    // without a running engine.
+                    // rolling buffer for on-demand clip capture (current scene
+                    // only). Non-blocking; no-op without a running engine.
                     self.submit_anomaly_frame(&data, width, height);
                 }
 
@@ -590,6 +601,73 @@ impl RobsController {
         // encoders' constant-framerate stream stays wall-clock paced. A
         // no-op when fresh frames were sent (the pacer is not due).
         self.resend_last_output_frame();
+    }
+
+    /// Feed every per-scene ISO recording track its scene's primary capture
+    /// frame (first visible capture item, same selection rule as the main
+    /// recorder). Called once per engine tick AFTER `process_preview_frames`
+    /// — that fn's preview rate-limiter early-returns would otherwise halve
+    /// the ISO cadence; the per-track pacer keeps each encoder at the target
+    /// fps by re-sending the scene's latest preview texture. ISO files are
+    /// CLEAN feeds: no annotations, text overlays, data-string boxes, or
+    /// logo (user decision — only the main recording bakes overlays).
+    pub(crate) fn feed_scene_recorders(&mut self) {
+        if !self.record.recording || self.record.recording_paused {
+            return;
+        }
+        if self.record.scene_tracks.is_empty() {
+            return;
+        }
+        let out_w = self.output_width;
+        let out_h = self.output_height;
+        let fps = self.fps_setting;
+
+        // Pacer first: only pay the scale cost on a track's due tick.
+        let mut due: Vec<usize> = Vec::new();
+        for (index, track) in self.record.scene_tracks.iter_mut().enumerate() {
+            if frame_pacer_due(&mut track.last_frame_time, fps) {
+                due.push(index);
+            }
+        }
+
+        for index in due {
+            let track = &mut self.record.scene_tracks[index];
+            let Some(tx) = track.frame_sender.as_ref() else {
+                continue;
+            };
+            // Scene -> primary visible capture item -> its warm preview
+            // texture (RGBA) -> scale to output -> BGRA for FFmpeg.
+            let frame = self
+                .scenes
+                .get(&track.scene_name)
+                .and_then(|scene| {
+                    scene
+                        .items()
+                        .iter()
+                        .filter(|i| i.is_visible())
+                        .find_map(|i| i.capture().is_some().then_some(i.id()))
+                })
+                .and_then(|item_id| self.preview.preview_frames.get(&item_id))
+                .map(|f| scale_frame_to_output(&f.data, f.width, f.height, out_w, out_h));
+            let Some(mut bgra) = frame else {
+                // No frame yet (capture still spinning up or the scene's
+                // sources vanished) — skip this tick; the pacer keeps the
+                // cadence once frames appear.
+                continue;
+            };
+            for chunk in bgra.chunks_exact_mut(4) {
+                chunk.swap(0, 2); // RGBA -> BGRA
+            }
+            if tx.send(bgra).is_err() {
+                // This scene's FFmpeg died: drop just the track (the file
+                // keeps whatever was written) and keep the session going.
+                eprintln!(
+                    "[ISO] FFmpeg channel closed for scene '{}'; dropping its track",
+                    track.scene_name
+                );
+                track.frame_sender = None;
+            }
+        }
     }
 }
 

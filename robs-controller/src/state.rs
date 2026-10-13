@@ -47,6 +47,24 @@ pub enum EventLogKind {
     Overlay,
 }
 
+/// One per-scene ISO (isolation) recording track: a dedicated FFmpeg child
+/// fed that scene's primary capture frame while the main recorder captures
+/// the current scene. Spawned at recording start for every OTHER scene with
+/// a visible capture source; torn down together with the main pipeline.
+#[allow(dead_code)]
+pub struct SceneTrack {
+    pub scene_name: String,
+    /// Output file (`<session>/ROBS_<timestamp>_<Scene>.<fmt>`).
+    pub output_path: String,
+    /// BGRA frames at output resolution, drained by the writer thread.
+    pub frame_sender: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    pub writer: Option<std::thread::JoinHandle<()>>,
+    pub child: Option<std::process::Child>,
+    /// Per-track encoder pacer (frames flow at the configured fps even when
+    /// this scene's preview texture updates more often or not at all).
+    pub last_frame_time: Option<std::time::Instant>,
+}
+
 /// Recording-session runtime state.
 ///
 /// `last_frame_time` and `frame_count` replace the former `static mut`
@@ -97,6 +115,26 @@ pub struct RecordState {
     /// file position. The gdigrab window-capture path lets FFmpeg pull frames
     /// itself, so marking there stays disabled.
     pub clip_marking_supported: bool,
+    /// Tape number typed in the Quick Actions bar, read each UI tick. Applied
+    /// once at recording start (see `session_tape_no`).
+    pub tape_no: String,
+    /// Sanitized tape number captured at recording start. The blackbox
+    /// channels embed it in their `tape.json` manifests as they (re)start
+    /// under the session, which is what makes the footage mergeable by tape.
+    pub session_tape_no: String,
+    /// Last used tape number; seeds the Quick Actions input on startup.
+    pub last_tape_no: String,
+    /// Results from background tape-merge ffmpeg threads, drained each tick
+    /// in `handle_events` (same pattern as the clip exporter). The pair is
+    /// created on the first merge and kept for the service's lifetime so
+    /// several queued jobs share one receiver.
+    pub merge_result_tx: Option<std::sync::mpsc::Sender<super::merge::MergeResult>>,
+    pub merge_result_rx: Option<std::sync::mpsc::Receiver<super::merge::MergeResult>>,
+    /// Tape merges still in flight (disables the merge buttons while > 0).
+    pub merge_pending: u32,
+    /// Per-scene ISO recording tracks (every OTHER scene with a visible
+    /// capture source), spawned at recording start and finalized on stop.
+    pub scene_tracks: Vec<SceneTrack>,
 }
 
 /// RTMP streaming-session runtime state.
@@ -177,17 +215,15 @@ pub struct OutputSpec {
     pub fps: f32,
 }
 
-/// Always-on Blackbox Dual Recording Engine state.
+/// One blackbox channel: the always-on safety recorder for ONE scene.
 ///
-/// Owns the engine (lazily (re)built from `settings`), the latest published
-/// status snapshot, and the event channel the engine reports through. The UI
-/// drains `event_rx` each frame to refresh `status` and log notable events.
-pub struct BlackboxState {
-    /// Master on/off. Honored live: toggling off stops a running engine.
-    pub enabled: bool,
-    /// Editable settings; projected into a fresh `BlackboxConfig` whenever the
-    /// engine (re)starts, so most edits take effect on the next start.
-    pub settings: robs_profiles::settings::BlackboxSettings,
+/// Multi-channel is a vector of these (see `BlackboxService`): every scene
+/// with a visible capture source gets its own channel and engine, writing to
+/// its own per-camera folder. `enabled` / `settings` / the session redirect
+/// live on the service — they are shared, not per channel.
+pub struct BlackboxChannel {
+    /// Scene name this channel records (also the per-camera folder name).
+    pub scene: String,
     /// The engine, if it has ever been started this session.
     pub engine: Option<robs_outputs::BlackboxEngine>,
     /// Latest health snapshot (refreshed from events).
@@ -195,10 +231,6 @@ pub struct BlackboxState {
     /// Event channel the engine publishes on.
     pub event_tx: robs_core::event::EventTx,
     pub event_rx: Option<robs_core::event::EventRx>,
-    /// When `Some`, the engine's output goes into the active recording's
-    /// session folder (`<session>/Blackbox`) instead of the settings/default
-    /// location. Set for the lifetime of a recording, cleared on stop.
-    pub session_override: Option<std::path::PathBuf>,
 }
 
 /// Short Clip Anomaly Capture engine state.
