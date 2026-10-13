@@ -13,7 +13,7 @@
 import { Theme } from "theme.slint";
 import { CanvasApi, CanvasTextView } from "canvas_api.slint";
 import { MiniTextButton } from "scenes_rail.slint";
-import { CheckBox, Slider } from "std-widgets.slint";
+import { CheckBox, ComboBox, Slider } from "std-widgets.slint";
 
 // One tool toggle in the toolbar: glyph + label, highlighted while active.
 component ToolButton inherits Rectangle {
@@ -85,6 +85,33 @@ component Swatch inherits Rectangle {
     touch := TouchArea {
         mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
         clicked => { CanvasApi.set-stroke-color(root.swatch); }
+    }
+}
+
+// Bold toggle for text annotations: a "B" that fills while active.
+component BoldToggle inherits Rectangle {
+    in property <bool> active;
+
+    width: 30px;
+    height: 24px;
+    border-radius: Theme.radius-sm;
+    background: root.active ? Theme.accent : (touch.has-hover ? Theme.card-alt : transparent);
+    border-width: 1px;
+    border-color: root.active ? Theme.accent-hover : Theme.border;
+
+    touch := TouchArea {
+        mouse-cursor: self.has-hover ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { CanvasApi.set-text-bold(!CanvasApi.text-bold); }
+    }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: "B";
+        font-size: Theme.font-md;
+        font-weight: 900;
+        color: root.active ? white : Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
     }
 }
 
@@ -168,6 +195,24 @@ export component AnnotationToolbar inherits Rectangle {
                 checked <=> CanvasApi.filled;
                 toggled => { CanvasApi.set-filled(CanvasApi.filled); }
             }
+        }
+
+        // ---- Text options: Bold + font family (Text tool only; both
+        // snapshot into NEW text annotations, like the stroke style) ----
+        if CanvasApi.text-enabled: BoldToggle { active: CanvasApi.text-bold; }
+        if CanvasApi.text-enabled: VerticalLayout {
+            alignment: center;
+            Text {
+                text: "Font";
+                font-size: Theme.font-xs;
+                color: Theme.text-dim;
+            }
+        }
+        if CanvasApi.text-enabled: ComboBox {
+            width: 150px;
+            model: CanvasApi.font-names;
+            current-index <=> CanvasApi.text-font-index;
+            selected => { CanvasApi.set-text-font(self.current-index); }
         }
 
         Sep { }

@@ -232,8 +232,8 @@ impl RobsController {
             if scene_w > 0 && scene_h > 0 {
                 let scale_x = out_w as f32 / scene_w as f32;
                 let scale_y = out_h as f32 / scene_h as f32;
-                if self.annotation.record_font.is_none() {
-                    self.annotation.record_font = crate::annotation_raster::load_system_font();
+                if self.annotation.record_fonts.is_empty() {
+                    self.annotation.record_fonts = crate::annotation_raster::RasterFonts::load();
                 }
                 if has_drawables {
                     crate::annotation_raster::composite_annotations(
@@ -243,7 +243,7 @@ impl RobsController {
                         &self.annotation.annotations,
                         scale_x,
                         scale_y,
-                        self.annotation.record_font.as_ref(),
+                        &self.annotation.record_fonts,
                     );
                     crate::annotation_raster::composite_text_overlays(
                         &mut scaled_data,
@@ -252,7 +252,7 @@ impl RobsController {
                         &self.text_overlays,
                         scale_x,
                         scale_y,
-                        self.annotation.record_font.as_ref(),
+                        self.annotation.record_fonts.default_face(),
                     );
                 }
                 // Data-string boxes: the two telemetry groups
@@ -280,7 +280,7 @@ impl RobsController {
                         &groups,
                         scale_x,
                         scale_y,
-                        self.annotation.record_font.as_ref(),
+                        self.annotation.record_fonts.default_face(),
                     );
                 }
                 // Company logo: resized to the configured fraction of the
