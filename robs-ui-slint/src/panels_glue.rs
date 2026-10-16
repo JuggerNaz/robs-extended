@@ -295,8 +295,10 @@ pub fn install(
         let controller = Rc::clone(controller);
         api.on_settings_closed(move || {
             // Closing is the settings-commit gesture (persists the anomaly
-            // section of the settings file, like the egui close handler).
+            // and live-server sections of the settings file, like the egui
+            // close handler).
             controller.borrow_mut().save_anomaly_settings();
+            controller.borrow_mut().save_live_server_settings();
             if let Some(root) = weak.upgrade() {
                 root.global::<PanelsApi>().set_settings_open(false);
             }
@@ -610,6 +612,13 @@ fn seed_settings(api: &PanelsApi, controller: &RobsController, state: &PanelsUi)
     api.set_cfg_stream_bitrate(controller.stream_bitrate as f32);
     api.set_cfg_keyframe_interval(controller.keyframe_interval as f32);
 
+    // Live Server (DVR viewing).
+    api.set_cfg_live_enabled(controller.live_server.settings.enabled);
+    api.set_cfg_live_stream_name(controller.live_server.settings.stream_name.as_str().into());
+    api.set_cfg_live_mediamtx_path(controller.live_server.settings.mediamtx_path.as_str().into());
+    api.set_cfg_live_supabase_url(controller.live_server.settings.supabase_url.as_str().into());
+    api.set_cfg_live_anon_key(controller.live_server.settings.supabase_anon_key.as_str().into());
+
     // Outputs.
     api.set_cfg_recording_format(controller.recording_format.as_str().into());
     api.set_cfg_recording_bitrate(controller.recording_bitrate as f32);
@@ -701,6 +710,24 @@ fn apply_settings_drift(
     controller.audio_encoder = api.get_cfg_audio_encoder().to_string();
     controller.stream_bitrate = api.get_cfg_stream_bitrate().max(0.0) as u32;
     controller.keyframe_interval = api.get_cfg_keyframe_interval().max(0.0) as u32;
+
+    // ---- Live Server (DVR viewing) ----
+    // The enabled checkbox starts/stops the viewer web server + MediaMTX
+    // sidecar on flip; the string fields are picked up on the next start.
+    let live_enabled = api.get_cfg_live_enabled();
+    if live_enabled != controller.live_server.settings.enabled {
+        controller.live_server.settings.enabled = live_enabled;
+        if live_enabled {
+            controller.start_live_server();
+        } else {
+            controller.stop_live_server();
+        }
+    }
+    controller.live_server.settings.stream_name = api.get_cfg_live_stream_name().to_string();
+    controller.live_server.settings.mediamtx_path = api.get_cfg_live_mediamtx_path().to_string();
+    controller.live_server.settings.supabase_url = api.get_cfg_live_supabase_url().to_string();
+    controller.live_server.settings.supabase_anon_key =
+        api.get_cfg_live_anon_key().to_string();
 
     // ---- Outputs ----
     controller.recording_format = api.get_cfg_recording_format().to_string();

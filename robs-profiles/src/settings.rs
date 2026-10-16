@@ -580,6 +580,149 @@ impl OverlaySettings {
     }
 }
 
+/// Settings for the self-hosted live-stream viewer (the `live_server`
+/// section of settings.json). When enabled, ROBS serves a login-protected
+/// web viewer for the DVR stream and manages a local MediaMTX sidecar that
+/// re-publishes the RTMP push for HLS/WebRTC playback.
+///
+/// Auth is delegated to web-app-offshore's Supabase project: viewers sign in
+/// with their existing email/password, and ROBS checks their tenancy with
+/// the user's own JWT via PostgREST (RLS on `structure` decides — the
+/// company that can read the configured structure may watch the streams).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Missing fields deserialize to the struct defaults, so a partial or
+/// hand-edited `live_server` section still loads.
+#[serde(default)]
+pub struct LiveServerSettings {
+    /// Master switch: serve the viewer web app (and keep the MediaMTX
+    /// sidecar running) while ROBS is open.
+    pub enabled: bool,
+    /// TCP port of the embedded viewer web server (behind the reverse
+    /// proxy, eg Caddy, in production).
+    pub web_port: u16,
+    /// Path of the MediaMTX binary (`mediamtx.exe` / `mediamtx`). Empty =
+    /// never spawned; an already-running MediaMTX on 1935 is still detected
+    /// and used.
+    pub mediamtx_path: String,
+    /// Supabase project URL of the web-app-offshore deployment
+    /// (`https://<ref>.supabase.co`).
+    pub supabase_url: String,
+    /// Supabase anon (publishable) key. Public by design — never put the
+    /// service-role key here.
+    pub supabase_anon_key: String,
+    /// Hex secret used to sign viewer session cookies. Auto-generated on
+    /// first start; regenerating it signs everyone out.
+    pub session_secret: String,
+    /// RTMP stream key / MediaMTX path name for the DVR stream.
+    pub stream_name: String,
+    /// Public hostname or IP the DVR is reachable on (advertised in the
+    /// MediaMTX config as `webrtcAdditionalHosts` so remote WebRTC viewers
+    /// get usable ICE candidates). Empty = HLS-only remote playback.
+    pub public_host: String,
+}
+
+impl Default for LiveServerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            web_port: 8080,
+            mediamtx_path: String::new(),
+            supabase_url: String::new(),
+            supabase_anon_key: String::new(),
+            session_secret: String::new(),
+            stream_name: "main".into(),
+            public_host: String::new(),
+        }
+    }
+}
+
+impl LiveServerSettings {
+    /// Load the `live_server` section from the canonical settings file,
+    /// mirroring [`SerialTelemetrySettings::load_or_default`]: present
+    /// section wins (missing fields fall back via `#[serde(default)]`),
+    /// absent section seeds defaults once, unreadable section warns.
+    pub fn load_or_default() -> Self {
+        let Some(path) = settings_file_path() else {
+            return Self::default();
+        };
+        let (settings, seed) = Self::resolve_from(&path);
+        if let Some(seed) = seed {
+            // Best-effort: seeding only materializes the defaults on disk.
+            let _ = seed.save_to(&path);
+        }
+        settings
+    }
+
+    /// Classify `path` and choose the settings to run with, plus an optional
+    /// defaults bundle to seed an absent section with. Pure — no disk writes
+    /// and no stderr on the happy paths — so it can be unit-tested against
+    /// temp files instead of the real config dir.
+    fn resolve_from(path: &Path) -> (Self, Option<Self>) {
+        match read_section(path, "live_server") {
+            SectionRead::Present(value) => match serde_json::from_value(value) {
+                Ok(settings) => (settings, None),
+                Err(_) => (Self::warn_unreadable(path), None),
+            },
+            SectionRead::Absent => {
+                let defaults = Self::default();
+                (defaults.clone(), Some(defaults))
+            }
+            SectionRead::Unreadable => (Self::warn_unreadable(path), None),
+        }
+    }
+
+    fn warn_unreadable(path: &Path) -> Self {
+        eprintln!(
+            "[Settings] live server settings unreadable, using defaults: {}",
+            path.display()
+        );
+        Self::default()
+    }
+
+    /// Persist the `live_server` section to the canonical settings file.
+    pub fn save(&self) -> Result<()> {
+        let path = settings_file_path().context("could not determine the config directory")?;
+        self.save_to(&path)
+    }
+
+    /// Read the `live_server` section of the JSON object at `path`. `None`
+    /// when the file is missing, unreadable, invalid JSON, or has no
+    /// `live_server` key.
+    pub fn load_from(path: &Path) -> Option<Self> {
+        match read_section(path, "live_server") {
+            SectionRead::Present(value) => serde_json::from_value(value).ok(),
+            _ => None,
+        }
+    }
+
+    /// Write the `live_server` section into the JSON object at `path`,
+    /// preserving every other section already present.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        let mut root: serde_json::Value = fs::read_to_string(path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let obj = root
+            .as_object_mut()
+            .context("settings file root is not a JSON object")?;
+        obj.insert("live_server".into(), serde_json::to_value(self)?);
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(&root)?)?;
+        Ok(())
+    }
+
+    /// True when the viewer web app has everything it needs to start
+    /// (Supabase endpoint + anon key for the login/tenant gate).
+    pub fn is_configured(&self) -> bool {
+        self.enabled
+            && !self.supabase_url.trim().is_empty()
+            && !self.supabase_anon_key.trim().is_empty()
+    }
+}
+
 /// Canonical settings file: `<config_dir>/settings.json`, sibling of the
 /// `profiles/` directory `ProfileManager` uses (same `ProjectDirs` root).
 pub fn settings_file_path() -> Option<PathBuf> {
@@ -841,6 +984,36 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn live_server_section_round_trips_and_preserves_siblings() {
+        let dir = scratch_dir("live-server");
+        let path = dir.join("settings.json");
+        write_file(&path, r#"{"anomaly": {"enabled": true}}"#);
+        // Absent section seeds defaults (and keeps the sibling).
+        let (settings, seed) = LiveServerSettings::resolve_from(&path);
+        assert_eq!(settings, LiveServerSettings::default());
+        seed.expect("absent live_server section should be seeded")
+            .save_to(&path)
+            .unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["anomaly"]["enabled"], serde_json::json!(true));
+        assert_eq!(root["live_server"]["stream_name"], serde_json::json!("main"));
+        // A written section loads back intact.
+        let configured = LiveServerSettings {
+            enabled: true,
+            web_port: 8443,
+            mediamtx_path: "C:\\tools\\mediamtx.exe".into(),
+            supabase_url: "https://ref.supabase.co".into(),
+            supabase_anon_key: "anon".into(),
+            session_secret: "aabb".into(),
+            stream_name: "offshore1".into(),
+            public_host: "dvr.example.com".into(),
+        };
+        configured.save_to(&path).unwrap();
+        assert_eq!(LiveServerSettings::load_from(&path), Some(configured));
     }
 
     #[test]

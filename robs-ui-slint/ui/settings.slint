@@ -268,7 +268,7 @@ component StreamingPage inherits VerticalLayout {
         label: "Service:";
         ComboBox {
             width: 160px;
-            model: ["YouTube", "Twitch", "Custom..."];
+            model: ["YouTube", "Twitch", "DVR (Self-hosted)", "Custom..."];
             current-value <=> PanelsApi.cfg-stream-service;
             selected(value) => {
                 // Picking a known service swaps in its ingest server; Custom
@@ -278,6 +278,11 @@ component StreamingPage inherits VerticalLayout {
                 }
                 if (value == "Twitch") {
                     PanelsApi.cfg-stream-server = "rtmp://live.twitch.tv/app";
+                }
+                if (value == "DVR (Self-hosted)") {
+                    // Local MediaMTX sidecar publish path; viewers watch via
+                    // the login-protected web server (see Live Server below).
+                    PanelsApi.cfg-stream-server = "rtmp://127.0.0.1:1935/live";
                 }
             }
         }
@@ -325,6 +330,36 @@ component StreamingPage inherits VerticalLayout {
     Separator { }
     Note {
         text: "YouTube key: YouTube Studio \u{2192} Go live \u{2192} Stream key. Twitch key: Settings \u{2192} Stream \u{2192} Primary Stream key.";
+    }
+    Separator { }
+    Heading { text: "Live Server (DVR viewing)"; }
+    Separator { }
+    CfgRow {
+        label: "Enabled:";
+        CheckBox {
+            checked <=> PanelsApi.cfg-live-enabled;
+            text: "Serve live streams from this DVR";
+        }
+    }
+    CfgRow {
+        label: "Stream Name:";
+        LineEdit { width: 240px; text <=> PanelsApi.cfg-live-stream-name; }
+    }
+    CfgRow {
+        label: "MediaMTX Path:";
+        LineEdit { width: 240px; text <=> PanelsApi.cfg-live-mediamtx-path; }
+    }
+    CfgRow {
+        label: "Supabase URL:";
+        LineEdit { width: 240px; text <=> PanelsApi.cfg-live-supabase-url; }
+    }
+    CfgRow {
+        label: "Supabase Anon Key:";
+        LineEdit { width: 240px; text <=> PanelsApi.cfg-live-anon-key; }
+    }
+    Separator { }
+    Note {
+        text: "Viewers sign in with their inspection-platform account and watch at this DVR's address (default port 8080). With the Database tab's structure set, only that structure's company can view. Enabled/fields apply on settings close (server restarts if enabled changed).";
     }
     Separator { }
     HorizontalLayout {

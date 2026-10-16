@@ -273,9 +273,32 @@ impl RobsController {
             return;
         }
 
+        // DVR (self-hosted) service: the push target is the MediaMTX sidecar
+        // on 127.0.0.1, which `robs-web` re-publishes to logged-in viewers.
+        // Make sure both the sidecar and the viewer app are up first; without
+        // them the push would succeed but nobody could watch it.
+        if self.stream_service.contains("DVR") && !self.live_server.is_running() {
+            self.start_live_server();
+            if !self.live_server.is_running() {
+                // start_live_server already logged the reason.
+                return;
+            }
+        }
+
+        // DVR streams name the publish path ("live/main"); when the operator
+        // leaves the key empty, fall back to the configured stream name so
+        // the viewer app's default watch link matches.
+        let key = if self.stream_key.trim().is_empty()
+            && self.stream_service.contains("DVR")
+        {
+            self.live_server.settings.stream_name.trim().to_string()
+        } else {
+            self.stream_key.clone()
+        };
+
         let params = StreamStartParams {
             server: self.stream_server.clone(),
-            key: self.stream_key.clone(),
+            key,
             encoder_setting: self.video_encoder.clone(),
             output_width: self.output_width,
             output_height: self.output_height,

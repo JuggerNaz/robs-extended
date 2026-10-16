@@ -21,6 +21,7 @@ pub mod merge;
 pub mod db;
 mod overlay;
 pub mod qid;
+mod live_server;
 mod record;
 mod stream;
 pub mod telemetry;
@@ -125,6 +126,9 @@ pub struct RobsController {
     // recording time segments (see `qid.rs` / `db.rs`). Service owning the
     // `QidState` cluster (field access flows through `Deref`).
     pub qid: qid::QidService,
+    // Self-hosted live-server service: MediaMTX sidecar + the `robs-web`
+    // viewer app (login + tenant-gated live viewing; see `live_server.rs`).
+    pub live_server: live_server::LiveServerService,
 }
 
 impl RobsController {
@@ -155,6 +159,11 @@ impl RobsController {
         if this.telemetry.settings.enabled {
             this.start_telemetry();
         }
+        // Auto-start the self-hosted live server when enabled (failures are
+        // logged, not fatal: the stream still works over plain RTMP).
+        if this.live_server.settings.enabled {
+            this.start_live_server();
+        }
         // Auto-load the QID list when the inspection DB is configured.
         this.init();
         this
@@ -162,6 +171,9 @@ impl RobsController {
 
     fn build() -> Self {
         let detection = detect_encoders();
+        // The inspection-DB settings feed both the QID worker and the live
+        // server's tenant gate (`structure_id`).
+        let database_settings = robs_profiles::settings::DatabaseSettings::load_or_default();
 
         let mut video_encoders = Vec::new();
         if detection.ffmpeg_available {
@@ -273,14 +285,17 @@ impl RobsController {
             ),
             overlay: OverlayService::default(),
             qid: {
-                let settings = robs_profiles::settings::DatabaseSettings::load_or_default();
-                let worker = settings
+                let worker = database_settings
                     .is_configured()
-                    .then(|| db::spawn(settings.clone()));
-                let mut service = qid::QidService::new(settings);
+                    .then(|| db::spawn(database_settings.clone()));
+                let mut service = qid::QidService::new(database_settings.clone());
                 service.db = worker;
                 service
             },
+            live_server: live_server::LiveServerService::new(
+                robs_profiles::settings::LiveServerSettings::load_or_default(),
+                &database_settings,
+            ),
         }
     }
 
@@ -474,6 +489,12 @@ impl RobsController {
         // Drain QID DB worker results (component lists, insert outcomes);
         // keep ticking while a load/save is in flight.
         if self.drain_qid_db_events() {
+            wake = min_wake(wake, std::time::Duration::from_millis(100));
+        }
+
+        // Drain live-server events (viewer sign-ins/denials, lifecycle);
+        // keep ticking briefly so the event log surfaces them promptly.
+        if self.drain_live_server_events() {
             wake = min_wake(wake, std::time::Duration::from_millis(100));
         }
 
