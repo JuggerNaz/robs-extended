@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::canvas_glue::{ann_bbox, path_commands, tool_index, TEXT_FONT_SIZE};
+use crate::canvas_glue::{ann_bbox, path_commands, tool_index};
 use crate::layout;
 use crate::{
     AnnotationView, Api, CanvasApi, CanvasTextView, DsRow, LogLineView, MainWindow, PanelsApi,
@@ -19,7 +19,7 @@ use crate::{
 use robs_controller::annotation_raster::DataStringRow;
 use robs_controller::state::{EventLogEntry, EventLogKind, PreviewFrame};
 use robs_controller::RobsController;
-use robs_core::{AnnotationShape, SceneItemId};
+use robs_core::{AnnotationShape, AnnotationTool, SceneItemId, TEXT_FONT_PRESETS};
 use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString,
     VecModel,
@@ -93,6 +93,8 @@ struct AnnSig {
     x: f32,
     y: f32,
     font_size: f32,
+    bold: bool,
+    font_family: String,
 }
 
 /// Change-detection signature of one pushed overlay row.
@@ -455,7 +457,6 @@ fn push_canvas(
     scale: f32,
 ) {
     let ann = &controller.annotation;
-    let font_px = (TEXT_FONT_SIZE * scale).max(8.0);
 
     // ---- Toolbar mirrors ----
     api.set_scene_width(scene_w as f32);
@@ -472,6 +473,18 @@ fn push_canvas(
         ann.annotation_tool.shape().map(|s| s.is_closed()).unwrap_or(false),
     );
     api.set_filled(style.filled);
+    // Text tool options (drift-guarded mirrors like the width slider).
+    api.set_text_enabled(ann.annotation_tool == AnnotationTool::Text);
+    if api.get_text_bold() != ann.text_bold {
+        api.set_text_bold(ann.text_bold);
+    }
+    let font_index = TEXT_FONT_PRESETS
+        .iter()
+        .position(|p| p.name == ann.text_font)
+        .unwrap_or(0) as i32;
+    if api.get_text_font_index() != font_index {
+        api.set_text_font_index(font_index);
+    }
     // Items stop being draggable while a drawing tool is active (egui
     // `draw_active` parity).
     api.set_draw_active(ann.show_annotations && ann.annotation_tool.shape().is_some());
@@ -500,7 +513,9 @@ fn push_canvas(
             text: annotation.text().to_string(),
             x: start.x * scale,
             y: start.y * scale,
-            font_size: font_px,
+            font_size: (annotation.font_size() * scale).max(8.0),
+            bold: annotation.bold(),
+            font_family: annotation.font_family().to_string(),
         };
         rows.push(AnnotationView {
             id: sig.id,
@@ -518,6 +533,8 @@ fn push_canvas(
             x: sig.x,
             y: sig.y,
             font_size: sig.font_size,
+            bold: sig.bold,
+            font_family: sig.font_family.as_str().into(),
             selected: ann.selected_annotation == Some(annotation.id()),
         });
         sigs.push(sig);
@@ -547,6 +564,8 @@ fn push_canvas(
                 x: 0.0,
                 y: 0.0,
                 font_size: 0.0,
+                bold: false,
+                font_family: "".into(),
                 selected: false,
             });
             api.set_drawing_active(true);

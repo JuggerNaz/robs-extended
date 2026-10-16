@@ -556,12 +556,15 @@ export component MainWindow inherits Window {
                     fill: ann.filled ? ann.stroke : transparent;
                 }
 
-                // Text annotations render as plain strings at their point.
+                // Text annotations render as plain strings at their point,
+                // honoring the annotation's bold flag + font preset.
                 for ann in CanvasApi.annotations: Text {
                     x: ann.x * 1px;
                     y: ann.y * 1px - ann.font-size * 1px;
                     text: ann.text;
                     font-size: ann.font-size * 1px;
+                    font-weight: ann.bold ? 700 : 400;
+                    font-family: ann.font-family;
                     color: ann.stroke;
                 }
             }
@@ -578,7 +581,9 @@ export component MainWindow inherits Window {
                 fill: CanvasApi.filled ? CanvasApi.stroke-color : transparent;
             }
 
-            // Selected annotation outline (cyan, like the egui port).
+            // Selected annotation outline (cyan, like the egui port) with
+            // corner resize handles (visuals only — the canvas TouchArea
+            // hit-tests ~8px around the corners; hidden while drawing).
             if annot-shown && CanvasApi.has-selection: Rectangle {
                 x: CanvasApi.sel-x * 1px - 4px;
                 y: CanvasApi.sel-y * 1px - 4px;
@@ -586,6 +591,15 @@ export component MainWindow inherits Window {
                 height: CanvasApi.sel-height * 1px + 8px;
                 border-width: 1.5px;
                 border-color: #00B4FF;
+
+                if !CanvasApi.draw-active: Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    ResizeHandle { x: 0; y: 0; }
+                    ResizeHandle { x: parent.width - self.width; y: 0; }
+                    ResizeHandle { x: 0; y: parent.height - self.height; }
+                    ResizeHandle { x: parent.width - self.width; y: parent.height - self.height; }
+                }
             }
 
             // Text overlays created from the Overlays tab — draggable labels.

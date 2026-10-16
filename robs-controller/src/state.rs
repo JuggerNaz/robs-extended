@@ -202,7 +202,15 @@ pub struct AnnotationState {
     pub selected_annotation: Option<robs_core::AnnotationId>,
     pub editing_text_id: Option<robs_core::AnnotationId>,
     pub text_input: String,
-    pub record_font: Option<ab_glyph::FontVec>,
+    /// Toolbar defaults for NEW text annotations: font size (scene units),
+    /// bold face, and font preset name — snapshotted at creation the same
+    /// way the stroke style is.
+    pub text_font_size: f32,
+    pub text_bold: bool,
+    pub text_font: String,
+    /// Text faces for the bake path, loaded lazily on the first annotated
+    /// frame (`RasterFonts::default()` until then).
+    pub record_fonts: crate::annotation_raster::RasterFonts,
 }
 
 /// The active output geometry + frame rate, passed to engine services that

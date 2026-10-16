@@ -8,11 +8,7 @@
 //! pipeline).
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
-use robs_core::{Annotation, AnnotationShape, Position};
-
-/// Font size (in scene units) used for `Text` annotations before scaling to
-/// the frame.
-pub const TEXT_FONT_SIZE: f32 = 32.0;
+use robs_core::{font_preset_by_name, Annotation, AnnotationShape, Position};
 
 /// Composite a set of annotations onto an RGBA8 (`[r, g, b, a]`) frame.
 ///
@@ -21,8 +17,9 @@ pub const TEXT_FONT_SIZE: f32 = 32.0;
 /// order supplied (later ones on top). Alpha is blended over the existing
 /// frame contents, so partially transparent colors composite correctly.
 ///
-/// `font` is required for `Text` annotations to render; if `None`, text is
-/// skipped (e.g. when no system font could be loaded).
+/// `fonts` supplies the text faces: each `Text` annotation resolves its
+/// preset by its own `font_family` and picks the bold face when `bold` was
+/// set; without any loaded face text is skipped (shapes still draw).
 pub fn composite_annotations(
     frame: &mut [u8],
     frame_w: u32,
@@ -30,7 +27,7 @@ pub fn composite_annotations(
     annotations: &[Annotation],
     scale_x: f32,
     scale_y: f32,
-    font: Option<&FontVec>,
+    fonts: &RasterFonts,
 ) {
     for ann in annotations.iter().filter(|a| a.is_visible()) {
         let style = ann.style();
@@ -112,11 +109,14 @@ pub fn composite_annotations(
                 }
             }
             AnnotationShape::Text => {
-                if let Some(font) = font {
-                    let text = ann.text();
-                    if !text.is_empty() {
-                        let size = TEXT_FONT_SIZE * scale_x;
-                        render_text(frame, frame_w, frame_h, font, x0, y0, text, color, size);
+                let text = ann.text();
+                if !text.is_empty() {
+                    if let Some(face) = fonts.face_for(ann.font_family(), ann.bold()) {
+                        // Per-annotation size (scene units), set by the
+                        // toolbar default at creation and by corner-resize
+                        // afterwards.
+                        let size = ann.font_size().max(1.0) * scale_x;
+                        render_text(frame, frame_w, frame_h, face, x0, y0, text, color, size);
                     }
                 }
             }
@@ -188,6 +188,72 @@ pub fn load_system_font() -> Option<FontVec> {
         }
     }
     None
+}
+
+/// Read one TrueType file into an `ab_glyph` face (`None` when missing or
+/// unparsable).
+fn read_ttf(path: &str) -> Option<FontVec> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|data| FontVec::try_from_vec(data).ok())
+}
+
+/// Loaded faces for the bake path: one regular + one bold `FontVec` per
+/// [`robs_core::TEXT_FONT_PRESETS`] entry with at least one readable file.
+/// Empty when nothing could be loaded — text annotations are then skipped
+/// exactly like the old `None`-font behavior.
+#[derive(Default)]
+pub struct RasterFonts {
+    entries: Vec<(&'static str, Option<FontVec>, Option<FontVec>)>,
+}
+
+impl RasterFonts {
+    /// Load every preset once (cached in `AnnotationState`, so this runs a
+    /// single time per process on the first annotated frame).
+    pub fn load() -> Self {
+        let mut entries = Vec::new();
+        for preset in robs_core::TEXT_FONT_PRESETS {
+            let regular = preset.regular_ttfs.iter().find_map(|p| read_ttf(p));
+            let bold = preset.bold_ttfs.iter().find_map(|p| read_ttf(p));
+            if regular.is_some() || bold.is_some() {
+                entries.push((preset.name, regular, bold));
+            }
+        }
+        Self { entries }
+    }
+
+    /// True when no face at all could be loaded.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Face for one text annotation: preset resolved by (case-insensitive)
+    /// family name, the bold face when `bold` (falling back to regular for
+    /// single-face presets like Impact), and any loaded face as the last
+    /// resort.
+    pub fn face_for(&self, family: &str, bold: bool) -> Option<&FontVec> {
+        let name = font_preset_by_name(family).name;
+        if let Some((_, regular, bold_face)) = self.entries.iter().find(|(n, _, _)| *n == name) {
+            if bold {
+                if let Some(face) = bold_face {
+                    return Some(face);
+                }
+            }
+            if let Some(face) = regular {
+                return Some(face);
+            }
+            return bold_face.as_ref();
+        }
+        self.default_face()
+    }
+
+    /// Any loaded face — the overlay / data-string path keeps its single
+    /// "system font" look.
+    pub fn default_face(&self) -> Option<&FontVec> {
+        self.entries
+            .iter()
+            .find_map(|(_, regular, bold)| regular.as_ref().or(bold.as_ref()))
+    }
 }
 
 /// Render a single line of text into the frame using `ab_glyph`.
@@ -580,6 +646,54 @@ mod tests {
         let before = frame.clone();
         composite_data_string(&mut frame, w, h, &[], 1.0, 1.0, None);
         assert_eq!(frame, before);
+    }
+
+    #[test]
+    fn bold_and_regular_faces_rasterize_differently() {
+        let fonts = RasterFonts::load();
+        let (Some(regular), Some(bold)) =
+            (fonts.face_for("Arial", false), fonts.face_for("Arial", true))
+        else {
+            return; // font discovery is environment-dependent
+        };
+        if std::ptr::eq(regular, bold) {
+            return; // only one face present — nothing to compare
+        }
+        let (w, h) = (320u32, 80u32);
+        let mut regular_frame = vec![0u8; (w * h * 4) as usize];
+        let mut bold_frame = vec![0u8; (w * h * 4) as usize];
+        render_text(&mut regular_frame, w, h, regular, 4.0, 8.0, "Wm", [255, 0, 0, 255], 48.0);
+        render_text(&mut bold_frame, w, h, bold, 4.0, 8.0, "Wm", [255, 0, 0, 255], 48.0);
+        assert_ne!(regular_frame, bold_frame);
+    }
+
+    #[test]
+    fn text_annotations_skip_without_faces_but_shapes_still_draw() {
+        let fonts = RasterFonts::default();
+        assert!(fonts.is_empty());
+        let (w, h) = (200u32, 100u32);
+        let mut frame = vec![255u8; (w * h * 4) as usize];
+        let mut text = Annotation::new(
+            AnnotationShape::Text,
+            Position::new(10.0, 40.0),
+            Position::new(10.0, 40.0),
+        );
+        text.set_text("invisible".to_string());
+        let line = Annotation::new(
+            AnnotationShape::Line,
+            Position::new(0.0, 0.0),
+            Position::new(100.0, 100.0),
+        );
+        composite_annotations(&mut frame, w, h, &[text, line], 1.0, 1.0, &fonts);
+        let px = |x: u32, y: u32| {
+            let o = ((y * w + x) * 4) as usize;
+            (frame[o], frame[o + 1], frame[o + 2])
+        };
+        // The diagonal line is stamped (its amber alpha-blend replaces the
+        // white) ...
+        assert_ne!(px(50, 50), (255, 255, 255));
+        // ... while the text region stays untouched without any face.
+        assert_eq!(px(12, 40), (255, 255, 255));
     }
 
     #[test]

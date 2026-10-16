@@ -18,15 +18,11 @@ use robs_controller::state::EventLogKind;
 use robs_controller::RobsController;
 use robs_core::{
     Annotation, AnnotationId, AnnotationShape, AnnotationTool, ObjectId, Position, Scale,
-    SceneItemId,
+    SceneItemId, TEXT_FONT_PRESETS,
 };
-use slint::{Color, ComponentHandle, Model, ModelRc, VecModel};
+use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::{CanvasApi, MainWindow, push};
-
-/// Text-annotation font size in scene units (mirror of
-/// `robs-ui/src/annotation_raster.rs`).
-pub(crate) const TEXT_FONT_SIZE: f32 = 32.0;
 
 /// What a press started — the pointer state machine.
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -41,6 +37,8 @@ enum DragMode {
     ResizeItem(SceneItemId),
     /// Translating a committed annotation.
     MoveAnn(AnnotationId),
+    /// Corner-resizing a committed annotation (anchor = opposite corner).
+    ResizeAnn(AnnotationId),
     /// Translating a text overlay label.
     MoveOverlay(ObjectId),
 }
@@ -58,6 +56,16 @@ pub struct CanvasUi {
     item_scale0: (f32, f32),
     /// Item rendered size in canvas px at press (ResizeItem).
     item_dims0: (f32, f32),
+    /// Corner grabbed on the selected annotation (0 TL, 1 TR, 2 BL, 3 BR).
+    ann_corner: usize,
+    /// Scene-space bbox `(min x, min y, w, h)` of the annotation at press;
+    /// dims clamped to >= 1.0 so degenerate boxes (flat lines) scale 1:1
+    /// on that axis.
+    ann_bbox0: (f32, f32, f32, f32),
+    /// Annotation clone at press — the source of truth for every move
+    /// event's rescale, so geometry always maps from the press state
+    /// (idempotent instead of compounding across move events).
+    ann_original: Option<Annotation>,
     /// Logo drag: `(grab canvas px, logo scene origin at press)`.
     logo_grab: Option<(f32, f32, f32, f32)>,
     /// Data-string group drag: `(group, origin scene x/y at press, grab
@@ -73,6 +81,9 @@ impl CanvasUi {
             item_pos0: Position::zero(),
             item_scale0: (1.0, 1.0),
             item_dims0: (0.0, 0.0),
+            ann_corner: 0,
+            ann_bbox0: (0.0, 0.0, 1.0, 1.0),
+            ann_original: None,
             logo_grab: None,
             ds_grab: None,
         }
@@ -98,6 +109,10 @@ pub fn install(
         api.set_text_overlays(ModelRc::new(VecModel::default()));
         api.set_selected_item_index(-1);
         api.set_stroke_width(controller.borrow().annotation.annotation_style.stroke_width);
+        // Static toolbar model: the font presets never change at runtime.
+        api.set_font_names(ModelRc::new(VecModel::from(
+            TEXT_FONT_PRESETS.iter().map(|p| SharedString::from(p.name)).collect::<Vec<_>>(),
+        )));
     }
 
     // Handlers re-acquire globals from the window inside the callback (a
@@ -141,6 +156,9 @@ pub fn install(
                 AnnotationTool::Text => {
                     let mut ann = Annotation::new(AnnotationShape::Text, scene, scene);
                     ann.set_style(c.annotation.annotation_style);
+                    ann.set_font_size(c.annotation.text_font_size);
+                    ann.set_bold(c.annotation.text_bold);
+                    ann.set_font_family(c.annotation.text_font.clone());
                     c.annotation.annotations.push(ann);
                     let new_id = c.annotation.annotations.last().map(|a| a.id());
                     c.annotation.editing_text_id = new_id;
@@ -157,7 +175,25 @@ pub fn install(
                         ui.last_px = (px, py);
                         return;
                     }
-                    // 2) Annotations, topmost first (6px slack, egui parity).
+                    // 2) Corner handles of the SELECTED annotation (resize;
+                    // the markup draws the matching handles on the outline).
+                    if let Some(sel) = c.annotation.selected_annotation {
+                        let hit = c
+                            .annotation
+                            .annotations
+                            .iter()
+                            .find(|a| a.id() == sel)
+                            .and_then(|a| ann_resize_hit(a, px, py, scale));
+                        if let Some(grab) = hit {
+                            let ui = &mut *state.borrow_mut();
+                            ui.mode = DragMode::ResizeAnn(sel);
+                            ui.ann_corner = grab.corner;
+                            ui.ann_bbox0 = grab.bbox;
+                            ui.ann_original = Some(grab.original);
+                            return;
+                        }
+                    }
+                    // 3) Annotations, topmost first (6px slack, egui parity).
                     if let Some(id) = hit_annotation(&c, px, py, scale) {
                         c.annotation.selected_annotation = Some(id);
                         let ui = &mut *state.borrow_mut();
@@ -165,7 +201,7 @@ pub fn install(
                         ui.last_px = (px, py);
                         return;
                     }
-                    // 3) Corner handles of the selected scene item.
+                    // 4) Corner handles of the selected scene item.
                     let selected = root.global::<CanvasApi>().get_selected_item_index();
                     if let Some((id, scale0, dims0)) = handle_hit(&c, selected, px, py, scale) {
                         let ui = &mut *state.borrow_mut();
@@ -175,7 +211,7 @@ pub fn install(
                         ui.last_px = (px, py);
                         return;
                     }
-                    // 4) Item bodies, topmost first (click = select).
+                    // 5) Item bodies, topmost first (click = select).
                     if let Some((id, index, pos)) = item_hit(&c, px, py, scale) {
                         root.global::<CanvasApi>()
                             .set_selected_item_index(index as i32);
@@ -185,7 +221,7 @@ pub fn install(
                         ui.last_px = (px, py);
                         return;
                     }
-                    // 5) Empty canvas: deselect everything.
+                    // 6) Empty canvas: deselect everything.
                     c.annotation.selected_annotation = None;
                     root.global::<CanvasApi>().set_selected_item_index(-1);
                 }
@@ -247,6 +283,39 @@ pub fn install(
                         c.scenes.current_scene_mut().and_then(|s| s.item_mut(id))
                     {
                         item.set_scale(Scale::new(sx, sy));
+                    }
+                }
+                DragMode::ResizeAnn(id) => {
+                    let Some(original) = ui.ann_original.clone() else {
+                        ui.mode = DragMode::Idle;
+                        return;
+                    };
+                    let scene = pos_to_scene(px, py, scale);
+                    let (omin_x, omin_y, ow, oh) = ui.ann_bbox0;
+                    // Anchor = the corner opposite the grabbed one; the new
+                    // box always spans anchor <-> pointer, so dragging past
+                    // the anchor flips the box instead of sticking.
+                    let (anchor_x, anchor_y) = match ui.ann_corner {
+                        0 => (omin_x + ow, omin_y + oh), // TL grabbed
+                        1 => (omin_x, omin_y + oh),      // TR
+                        2 => (omin_x + ow, omin_y),      // BL
+                        _ => (omin_x, omin_y),           // BR
+                    };
+                    let nx = anchor_x.min(scene.x);
+                    let ny = anchor_y.min(scene.y);
+                    let nw = (scene.x - anchor_x).abs().max(1.0);
+                    let nh = (scene.y - anchor_y).abs().max(1.0);
+                    let mut resized = original;
+                    resized.rescale(
+                        Position::new(omin_x, omin_y),
+                        (ow, oh),
+                        Position::new(nx, ny),
+                        (nw, nh),
+                    );
+                    if let Some(ann) =
+                        c.annotation.annotations.iter_mut().find(|a| a.id() == id)
+                    {
+                        *ann = resized;
                     }
                 }
                 DragMode::MoveAnn(id) => {
@@ -325,6 +394,7 @@ pub fn install(
                 }
             }
             ui.mode = DragMode::Idle;
+            ui.ann_original = None;
         });
     }
 
@@ -390,6 +460,20 @@ pub fn install(
         let controller = Rc::clone(controller);
         api.on_set_filled(move |filled: bool| {
             controller.borrow_mut().annotation.annotation_style.filled = filled;
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        api.on_set_text_bold(move |bold: bool| {
+            controller.borrow_mut().annotation.text_bold = bold;
+        });
+    }
+    {
+        let controller = Rc::clone(controller);
+        api.on_set_text_font(move |index: i32| {
+            let idx = index.clamp(0, TEXT_FONT_PRESETS.len() as i32 - 1) as usize;
+            let mut c = controller.borrow_mut();
+            c.annotation.text_font = TEXT_FONT_PRESETS[idx].name.to_string();
         });
     }
     {
@@ -571,6 +655,14 @@ pub(crate) fn tool_index(tool: AnnotationTool) -> i32 {
 /// Canvas-px bounding box of an annotation (egui `screen_bbox` port).
 /// `None` for an empty pen stroke.
 pub(crate) fn ann_bbox(ann: &Annotation, scale: f32) -> Option<(f32, f32, f32, f32)> {
+    let (min, w, h) = ann_bbox_scene(ann)?;
+    Some((min.x * scale, min.y * scale, w * scale, (h * scale).max(8.0)))
+}
+
+/// Scene-space bounding box of an annotation: min corner + size (units).
+/// Text uses the same 0.6-em/char + 1.3-em estimates as the canvas version,
+/// driven by the annotation's own (resizable) font size.
+pub(crate) fn ann_bbox_scene(ann: &Annotation) -> Option<(Position, f32, f32)> {
     match ann.shape() {
         AnnotationShape::Pen => {
             if ann.points().is_empty() {
@@ -586,30 +678,49 @@ pub(crate) fn ann_bbox(ann: &Annotation, scale: f32) -> Option<(f32, f32, f32, f
                 max_x = max_x.max(p.x);
                 max_y = max_y.max(p.y);
             }
-            Some((
-                min_x * scale,
-                min_y * scale,
-                (max_x - min_x) * scale,
-                (max_y - min_y) * scale,
-            ))
+            Some((Position::new(min_x, min_y), max_x - min_x, max_y - min_y))
         }
         AnnotationShape::Text => {
-            let font_px = (TEXT_FONT_SIZE * scale).max(8.0);
             // egui's estimate: 0.6 em per character, at least 20px wide.
-            let w = (ann.text().len().max(1) as f32 * font_px * 0.6).max(20.0);
-            let s = ann.start();
-            Some((s.x * scale, s.y * scale, w, font_px * 1.3))
+            let font = ann.font_size().max(1.0);
+            let w = (ann.text().len().max(1) as f32 * font * 0.6).max(20.0);
+            Some((ann.start(), w, font * 1.3))
         }
         _ => {
             let (s, e) = (ann.start(), ann.end());
             Some((
-                s.x.min(e.x) * scale,
-                s.y.min(e.y) * scale,
-                (e.x - s.x).abs() * scale,
-                (e.y - s.y).abs() * scale,
+                Position::new(s.x.min(e.x), s.y.min(e.y)),
+                (e.x - s.x).abs(),
+                (e.y - s.y).abs(),
             ))
         }
     }
+}
+
+/// Corner-hit test on the selected annotation's bbox (canvas px, 8px slack
+/// like the scene-item handles).
+struct AnnResizeGrab {
+    /// Corner grabbed (0 TL, 1 TR, 2 BL, 3 BR).
+    corner: usize,
+    /// Scene bbox `(min x, min y, w, h)` at press; dims clamped to >= 1.0
+    /// so degenerate boxes (flat lines) scale 1:1 on that axis.
+    bbox: (f32, f32, f32, f32),
+    /// Annotation clone at press — the resize source of truth.
+    original: Annotation,
+}
+
+fn ann_resize_hit(ann: &Annotation, px: f32, py: f32, scale: f32) -> Option<AnnResizeGrab> {
+    let (x, y, w, h) = ann_bbox(ann, scale)?;
+    let corners = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)];
+    let corner = corners
+        .iter()
+        .position(|(cx, cy)| (px - cx).abs() <= 8.0 && (py - cy).abs() <= 8.0)?;
+    let (min, sw, sh) = ann_bbox_scene(ann)?;
+    Some(AnnResizeGrab {
+        corner,
+        bbox: (min.x, min.y, sw.max(1.0), sh.max(1.0)),
+        original: ann.clone(),
+    })
 }
 
 /// SVG-like path commands for an annotation, in SCENE coordinates (the

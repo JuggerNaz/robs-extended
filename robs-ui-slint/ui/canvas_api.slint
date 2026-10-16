@@ -23,7 +23,10 @@ export struct AnnotationView {
     // Canvas-pixel anchor for text annotations.
     x: float,
     y: float,
+    // Per-annotation text size (canvas px) + styling.
     font-size: float,
+    bold: bool,
+    font-family: string,
     selected: bool,
 }
 
@@ -75,6 +78,10 @@ export global CanvasApi {
     callback set-stroke-color(color);
     callback set-stroke-width(float);
     callback set-filled(bool);
+    // Text-annotation options (snapshotted into NEW text, like the stroke
+    // style is into every new shape).
+    callback set-text-bold(bool);
+    callback set-text-font(int);
     callback undo-annotation();
     callback clear-annotations();
 
@@ -116,6 +123,12 @@ export global CanvasApi {
     // Fill checkbox is only meaningful for closed shapes (Rectangle/Ellipse).
     in property <bool> fill-enabled;
     in property <bool> filled;
+    // Text options, shown while the Text tool is active (the fill analogue
+    // for text); `font-names` lists robs_core::TEXT_FONT_PRESETS by name.
+    in property <bool> text-enabled;
+    in property <[string]> font-names;
+    in-out property <int> text-font-index;
+    in-out property <bool> text-bold;
     // True while a shape/pen/text tool is active (items stop being draggable,
     // handles hide — egui `draw_active` parity).
     in property <bool> draw-active;
