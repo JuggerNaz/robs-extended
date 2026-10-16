@@ -137,6 +137,13 @@ export global PanelsApi {
     in-out property <string> cfg-audio-encoder;
     in-out property <float> cfg-stream-bitrate;
     in-out property <float> cfg-keyframe-interval;
+    // Live Server (DVR self-hosted viewing; web_port + session secret stay
+    // settings.json-only — they rarely change and are not edited from here).
+    in-out property <bool> cfg-live-enabled;
+    in-out property <string> cfg-live-stream-name;
+    in-out property <string> cfg-live-mediamtx-path;
+    in-out property <string> cfg-live-supabase-url;
+    in-out property <string> cfg-live-anon-key;
 
     // Outputs (format/encoders/bitrate are in-out; path arrives via Browse)
     in-out property <string> cfg-recording-format;

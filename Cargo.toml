@@ -13,6 +13,7 @@ members = [
     "robs-plugins",
     "robs-profiles",
     "robs-chat",
+    "robs-web",
 ]
 
 [workspace.package]
@@ -49,6 +50,10 @@ serialport = "4"
 postgres = { version = "0.19", features = ["with-chrono-0_4"] }
 postgres-native-tls = "0.5"
 native-tls = "0.2"
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
+hmac = "0.12"
+sha2 = "0.10"
 
 robs-core = { path = "robs-core" }
 robs-video = { path = "robs-video" }
@@ -61,6 +66,7 @@ robs-ui-slint = { path = "robs-ui-slint" }
 robs-plugins = { path = "robs-plugins" }
 robs-profiles = { path = "robs-profiles" }
 robs-chat = { path = "robs-chat" }
+robs-web = { path = "robs-web" }
 
 [profile.release]
 lto = "thin"
