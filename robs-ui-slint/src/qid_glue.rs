@@ -1,22 +1,20 @@
 //! QID rail glue: wires the `QidApi` commands to the controller's QID engine
 //! (`robs-controller/src/qid.rs`) and pushes the filtered component list plus
-//! the CURRENT QID panel state into the rail every tick. Follows the same
-//! borrow idioms as `telemetry_glue` (callbacks take
+//! the RECORDING panel state (every open link) into the rail every tick.
+//! Follows the same borrow idioms as `telemetry_glue` (callbacks take
 //! `Rc<RefCell<RobsController>>`).
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use robs_controller::qid::{qid_matches, QidComponent};
 use robs_controller::state::EventLogKind;
 use robs_controller::RobsController;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
-use crate::{MainWindow, QidApi, QidRowView};
-
-/// Placeholder for the "START —" slot when no segment is open.
-const EMPTY: &str = "—";
+use crate::{MainWindow, QidApi, QidOpenView, QidRowView};
 
 /// UI-side state for the QID rail: the live search filter (lowercased;
 /// matches `q_id`, `id_no`, and `code` — see `qid::qid_matches`) plus the
@@ -34,6 +32,11 @@ pub struct QidUi {
     rows: Rc<VecModel<QidRowView>>,
     /// Owned copy of the rows currently in `rows`, for change detection.
     rows_mirror: Vec<QidRowView>,
+    /// The RECORDING panel's open-link rows — same persistent-model idiom as
+    /// `rows` (the panel entries carry TouchAreas; rebuilding the model every
+    /// tick would recreate the delegates mid-click and swallow it).
+    open_rows: Rc<VecModel<QidOpenView>>,
+    open_mirror: Vec<QidOpenView>,
 }
 
 impl QidUi {
@@ -42,13 +45,20 @@ impl QidUi {
             filter: String::new(),
             rows: Rc::new(VecModel::from(Vec::new())),
             rows_mirror: Vec::new(),
+            open_rows: Rc::new(VecModel::from(Vec::new())),
+            open_mirror: Vec::new(),
         }
     }
 }
 
 /// True when a pushed row's visible fields differ from its mirrored copy.
 fn row_differs(a: &QidRowView, b: &QidRowView) -> bool {
-    a.id != b.id || a.current != b.current || a.q_id != b.q_id || a.sub != b.sub
+    a.id != b.id || a.recording != b.recording || a.q_id != b.q_id || a.sub != b.sub
+}
+
+/// Same check for the RECORDING panel's open-link rows.
+fn open_row_differs(a: &QidOpenView, b: &QidOpenView) -> bool {
+    a.id != b.id || a.q_id != b.q_id || a.sub != b.sub || a.start != b.start
 }
 
 /// Sub-label under the QID: `id_no`, falling back to `code`.
@@ -98,40 +108,59 @@ pub fn install(
         });
     }
 
-    // ---- Info button: log the current QID (and mark start) to the event log
+    // ---- Info button: log every open link (or the armed QID) to the event log
     {
         let controller = Rc::clone(controller);
         api.on_details(move || {
             let mut controller = controller.borrow_mut();
+            let open: Vec<(String, String, String)> = controller
+                .qid
+                .open
+                .iter()
+                .map(|seg| {
+                    (
+                        seg.component.q_id.clone(),
+                        sub_label(&seg.component).to_string(),
+                        seg.start
+                            .wall
+                            .with_timezone(&Local)
+                            .format("%H:%M:%S")
+                            .to_string(),
+                    )
+                })
+                .collect();
+            if !open.is_empty() {
+                for (q_id, sub, start) in open {
+                    controller.log_event(
+                        format!("QID {q_id} ({sub}) — recording since {start}"),
+                        EventLogKind::Info,
+                    );
+                }
+                return;
+            }
             let Some(current) = controller.qid.current.clone() else {
                 return;
             };
             let sub = sub_label(&current).to_string();
-            let msg = match controller.qid.open.as_ref() {
-                Some(open) => format!(
-                    "QID {} ({}) — marking since {}",
-                    current.q_id,
-                    sub,
-                    open.start.wall.with_timezone(&Local).format("%H:%M:%S")
-                ),
-                None if controller.record.recording => {
-                    format!("QID {} ({}) — no open segment", current.q_id, sub)
-                }
-                None => format!(
+            let msg = if controller.record.recording {
+                format!("QID {} ({}) — no open link", current.q_id, sub)
+            } else {
+                format!(
                     "QID {} ({}) — selected; marking starts with the next recording",
                     current.q_id, sub
-                ),
+                )
             };
             controller.log_event(msg, EventLogKind::Info);
         });
     }
 }
 
-/// Push the snapshot into the rail: filtered rows, header count, CURRENT QID
-/// panel, and the DB status chip.
+/// Push the snapshot into the rail: filtered rows (with per-QID recording
+/// highlights), header count, RECORDING panel, and the DB status chip.
 pub fn push(component: &MainWindow, controller: &RobsController, qid_ui: &mut QidUi) {
     let api = component.global::<QidApi>();
     let qid = &controller.qid;
+    let open_ids: HashSet<i64> = qid.open.iter().map(|s| s.component.id).collect();
 
     let rows: Vec<QidRowView> = qid
         .components
@@ -141,7 +170,7 @@ pub fn push(component: &MainWindow, controller: &RobsController, qid_ui: &mut Qi
             id: c.id as i32,
             q_id: c.q_id.as_str().into(),
             sub: sub_label(c).into(),
-            current: qid.current.as_ref().map(|cur| cur.id) == Some(c.id),
+            recording: open_ids.contains(&c.id),
         })
         .collect();
     if qid_ui.rows_mirror.len() != rows.len()
@@ -167,19 +196,50 @@ pub fn push(component: &MainWindow, controller: &RobsController, qid_ui: &mut Qi
     // Header count shows the TOTAL loaded rows, not the filtered view.
     api.set_total(qid.components.len() as i32);
 
-    let current = qid.current.as_ref();
-    api.set_has_current(current.is_some());
-    api.set_current_qid(current.map(|c| c.q_id.as_str().into()).unwrap_or_default());
-    api.set_current_sub(
-        current.map(|c| SharedString::from(sub_label(c))).unwrap_or_default(),
-    );
-    api.set_current_start(
-        qid.open
-            .as_ref()
-            .map(|s| s.start.wall.with_timezone(&Local).format("%H:%M:%S").to_string())
-            .unwrap_or_else(|| EMPTY.to_string())
-            .into(),
-    );
+    // RECORDING panel: every open link, ordered by start time. Same
+    // wholesale-swap vs in-place-update split as the main rows.
+    let mut open_rows: Vec<(DateTime<Utc>, QidOpenView)> = qid
+        .open
+        .iter()
+        .map(|seg| {
+            (
+                seg.start.wall,
+                QidOpenView {
+                    id: seg.component.id as i32,
+                    q_id: seg.component.q_id.as_str().into(),
+                    sub: sub_label(&seg.component).into(),
+                    start: seg
+                        .start
+                        .wall
+                        .with_timezone(&Local)
+                        .format("%H:%M:%S")
+                        .to_string()
+                        .into(),
+                },
+            )
+        })
+        .collect();
+    open_rows.sort_by_key(|(wall, _)| *wall);
+    let open_views: Vec<QidOpenView> = open_rows.into_iter().map(|(_, view)| view).collect();
+    if qid_ui.open_mirror.len() != open_views.len()
+        || qid_ui
+            .open_mirror
+            .iter()
+            .zip(open_views.iter())
+            .any(|(m, r)| m.id != r.id)
+    {
+        qid_ui.open_rows.set_vec(open_views.clone());
+    } else {
+        for (i, view) in open_views.iter().enumerate() {
+            if open_row_differs(&qid_ui.open_mirror[i], view) {
+                qid_ui.open_rows.set_row_data(i, view.clone());
+            }
+        }
+    }
+    qid_ui.open_mirror = open_views;
+    api.set_open_qids(ModelRc::from(qid_ui.open_rows.clone()));
+    api.set_has_open(!qid.open.is_empty());
+    api.set_open_count(qid.open.len() as i32);
 
     api.set_db_status(qid.status.as_str().into());
     api.set_db_status_state(qid.status_state);

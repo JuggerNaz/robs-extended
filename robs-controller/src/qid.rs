@@ -2,9 +2,12 @@
 //!
 //! The QID rail lists `structure_components` rows (loaded over Postgres from
 //! web-app-offshore's Supabase DB, see `db.rs`). While a recording runs,
-//! clicking a QID closes the currently open segment at *now* and opens a new
-//! one for the clicked component — "from this time to this time belonged to
-//! that QID". This is the QID analogue of the clip marks in `clips.rs`:
+//! clicking a QID toggles its recording link: a click on an idle QID opens a
+//! new segment at *now* (leaving any other open links untouched), and a click
+//! on a QID that is already recording closes only that segment — so several
+//! QIDs can be attributed overlapping spans of the same recording
+//! ("from this time to this time belonged to that QID"). This is the QID
+//! analogue of the clip marks in `clips.rs`:
 //!
 //! - Every segment is anchored to THREE clocks at once: wall clock (UTC),
 //!   the recording's elapsed milliseconds (`RecordState::recording_time`,
@@ -13,14 +16,16 @@
 //!   per-QID clips losslessly later).
 //! - Segments survive a pause unchanged (pause gates frame sends and the
 //!   elapsed accumulator; the wall clock spans the gap, like clip marks).
-//! - On stop the open segment auto-closes at the final anchors, all closed
-//!   segments are written to a sidecar JSON next to the recording (crash
-//!   safety), and handed to the DB worker thread for persistence.
+//! - On stop every still-open segment auto-closes at the final anchors (each
+//!   keeping its own start), all closed segments are written to a sidecar JSON
+//!   next to the recording (crash safety), and handed to the DB worker thread
+//!   for persistence. The sidecar/table are per-segment rows, so overlapping
+//!   multi-QID spans need no schema change.
 //!
 //! The transitions are pure functions so they unit-test without a recording.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use robs_profiles::settings::DatabaseSettings;
 
@@ -53,8 +58,9 @@ pub struct SegmentAnchor {
     pub frame: u64,
 }
 
-/// One closed segment: recording time attributed to a QID.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+/// One closed segment: recording time attributed to a QID. (Deserialize is
+/// for tests reading back a sidecar; the recorder only ever writes it.)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QidSegment {
     pub component_id: i64,
     /// Structure owning the component (newer sidecars have this key; older
@@ -80,14 +86,12 @@ pub struct OpenSegment {
 
 /// Outcome of one QID click; pure so it can be unit-tested.
 #[derive(Clone, Debug, PartialEq)]
-pub enum QidSelectAction {
-    /// Nothing was open; the clicked QID is now open.
+pub enum QidClickAction {
+    /// The clicked QID had no open link; one is now open (any other open
+    /// links are untouched).
     Opened(QidComponent),
-    /// The open segment closed at `now` and the clicked QID opened.
-    Switched { closed: QidSegment, opened: QidComponent },
-    /// The clicked QID is already the open one — no-op (re-click confirms
-    /// rather than splitting the segment).
-    SameQid,
+    /// The clicked QID's link closed at `now`; other open links continue.
+    Closed(QidSegment),
 }
 
 /// Close `open` at `now`, attributing the span to its component.
@@ -107,26 +111,24 @@ pub fn close_segment(open: &OpenSegment, now: SegmentAnchor, recording_path: &st
     }
 }
 
-/// Pure transition for a QID click while a recording runs.
+/// Pure transition for a QID click while a recording runs: a toggle on the
+/// clicked QID's link. Links are independent — at most one open segment per
+/// component, but any number of components may be open concurrently and
+/// their closed spans may overlap.
 ///
-/// - Clicking the already-open QID is a no-op (`SameQid`) so stray
-///   double-clicks cannot split a segment.
-/// - Clicking a different QID closes the open segment at `now` and opens
-///   the new one (even when `now` <= open start, the closed segment simply
-///   has a zero-or-negative length and the caller may discard it).
-pub fn apply_qid_select(
-    open: Option<&OpenSegment>,
+/// - Clicking an idle QID opens its segment at `now`.
+/// - Clicking an already-open QID closes only its segment at `now` (even
+///   when `now` <= its start, the closed segment simply has a zero-or-
+///   negative length and the caller may discard it).
+pub fn apply_qid_click(
+    open: &[OpenSegment],
     clicked: QidComponent,
     now: SegmentAnchor,
     recording_path: &str,
-) -> QidSelectAction {
-    match open {
-        Some(current) if current.component.id == clicked.id => QidSelectAction::SameQid,
-        Some(current) => QidSelectAction::Switched {
-            closed: close_segment(current, now, recording_path),
-            opened: clicked,
-        },
-        None => QidSelectAction::Opened(clicked),
+) -> QidClickAction {
+    match open.iter().find(|s| s.component.id == clicked.id) {
+        Some(current) => QidClickAction::Closed(close_segment(current, now, recording_path)),
+        None => QidClickAction::Opened(clicked),
     }
 }
 
@@ -141,18 +143,20 @@ pub fn qid_matches(component: &QidComponent, needle: &str) -> bool {
 }
 
 /// QID-rail runtime state owned by the controller: the loaded component
-/// list, the current selection, the open segment, and the closed segments
+/// list, the current selection, the open segments, and the closed segments
 /// of the running session.
 pub struct QidState {
     /// Persisted connection settings (`settings.json` `database` section).
     pub settings: DatabaseSettings,
     /// Components loaded from `structure_components` (ordered by `q_id`).
     pub components: Vec<QidComponent>,
-    /// Selected QID. Selection persists across recordings; segments only
-    /// open while a recording runs (clicking while idle pre-selects).
+    /// Last-clicked ("armed") QID. Selection persists across recordings;
+    /// it auto-opens a segment when the next recording starts. Segments only
+    /// open while a recording runs (clicking while idle never reaches here).
     pub current: Option<QidComponent>,
-    /// Segment currently accumulating time (only while recording).
-    pub open: Option<OpenSegment>,
+    /// Segments currently accumulating time (only while recording; one per
+    /// component, several components concurrently).
+    pub open: Vec<OpenSegment>,
     /// Closed segments of the running (or just-stopped) session.
     pub segments: Vec<QidSegment>,
     /// DB worker handle when the database is configured.
@@ -176,7 +180,7 @@ impl QidState {
             settings,
             components: Vec::new(),
             current: None,
-            open: None,
+            open: Vec::new(),
             segments: Vec::new(),
             db: None,
             status,
@@ -247,9 +251,11 @@ impl QidService {
         None
     }
 
-    /// QID rail click: close the open segment and open a new one for the
-    /// clicked QID. Returns the event-log lines in order. The recording
-    /// guard stays with the facade — idle clicks never reach this method.
+    /// QID rail click: toggle the clicked QID's recording link — open it
+    /// when idle, close only it when already recording. Other open links are
+    /// untouched, so several QIDs can record concurrently. Returns the
+    /// event-log lines in order. The recording guard stays with the facade —
+    /// idle clicks never reach this method.
     pub fn select(
         &mut self,
         component_id: i64,
@@ -267,37 +273,35 @@ impl QidService {
 
         let mut logs: Vec<(String, EventLogKind)> = Vec::new();
         let mut closed: Option<QidSegment> = None;
-        match apply_qid_select(self.open.as_ref(), component.clone(), anchor, recording_path) {
-            QidSelectAction::SameQid => return logs,
-            QidSelectAction::Opened(c) => {
-                self.open = Some(OpenSegment { component: c, start: anchor });
+        match apply_qid_click(&self.open, component.clone(), anchor, recording_path) {
+            QidClickAction::Opened(c) => {
+                self.open.push(OpenSegment { component: c, start: anchor });
                 logs.push((
                     format!(
-                        "QID marking started: {} at {}",
+                        "QID marking started: {} at {} ({} link(s) open)",
                         component.q_id,
-                        crate::RobsController::format_time((anchor.elapsed_ms / 1000) as u64)
+                        crate::RobsController::format_time((anchor.elapsed_ms / 1000) as u64),
+                        self.open.len()
                     ),
                     EventLogKind::Record,
                 ));
             }
-            QidSelectAction::Switched { closed: seg, opened } => {
+            QidClickAction::Closed(seg) => {
                 logs.push((
                     format!(
-                        "QID changed: {} (segment {} \u{2013} {})",
-                        opened.q_id,
+                        "QID marking ended: {} (segment {} \u{2013} {})",
+                        component.q_id,
                         crate::RobsController::format_time((seg.elapsed_start_ms / 1000) as u64),
                         crate::RobsController::format_time((seg.elapsed_end_ms / 1000) as u64),
                     ),
                     EventLogKind::Record,
                 ));
-                self.open = Some(OpenSegment {
-                    component: opened,
-                    start: anchor,
-                });
+                self.open.retain(|s| s.component.id != component.id);
                 closed = Some(seg);
             }
         }
-        // The CURRENT QID panel and row highlight follow the open segment.
+        // Row highlights follow the open links; `current` tracks the last
+        // click so the next recording auto-opens this QID.
         self.current = Some(component);
         if let Some(seg) = closed {
             self.segments.push(seg);
@@ -311,24 +315,35 @@ impl QidService {
     /// `start_recording` after the session state resets.
     pub fn start_session(&mut self, anchor: SegmentAnchor) {
         self.segments.clear();
-        self.open = self.current.clone().map(|component| OpenSegment {
-            component,
-            start: anchor,
-        });
+        self.open = self
+            .current
+            .clone()
+            .map(|component| OpenSegment {
+                component,
+                start: anchor,
+            })
+            .into_iter()
+            .collect();
     }
 
-    /// Auto-close the open segment at the final recording anchors, write
-    /// the sidecar JSON, and hand all segments to the DB worker. Called
-    /// from `stop_recording` BEFORE the elapsed-time reset. Returns the
-    /// event-log lines in order.
+    /// Auto-close every open segment at the final recording anchors (each
+    /// keeping its own start), write the sidecar JSON, and hand all segments
+    /// to the DB worker. Called from `stop_recording` BEFORE the elapsed-time
+    /// reset. Returns the event-log lines in order.
     pub fn stop_session(
         &mut self,
         anchor: SegmentAnchor,
         recording_path: &str,
     ) -> Vec<(String, EventLogKind)> {
-        if let Some(open) = self.open.take() {
-            self.segments.push(close_segment(&open, anchor, recording_path));
-        }
+        // Take first, then extend: field access goes through `DerefMut`, so
+        // draining `self.open` while pushing to `self.segments` would hold
+        // two overlapping borrows of `*self`.
+        let open_segments = std::mem::take(&mut self.open);
+        self.segments.extend(
+            open_segments
+                .iter()
+                .map(|open| close_segment(open, anchor, recording_path)),
+        );
         let segments = std::mem::take(&mut self.segments);
         let mut logs: Vec<(String, EventLogKind)> = Vec::new();
         if segments.is_empty() {
@@ -435,7 +450,7 @@ impl QidService {
     }
 
     /// Append the already-closed segments to the sidecar (called per QID
-    /// switch so a crash mid-recording keeps every closed span).
+    /// link end so a crash mid-recording keeps every closed span).
     fn append_sidecar(&mut self, recording_path: &str) {
         if self.segments.is_empty() {
             return;
@@ -468,10 +483,11 @@ impl RobsController {
         }
     }
 
-    /// QID rail click: close the open segment and open a new one for the
-    /// clicked QID. Clicks only mark while a recording runs — idle clicks
-    /// are ignored (the rail shows this via the default cursor and no
-    /// hover highlight, see `qid_rail.slint`).
+    /// QID rail click: toggle the clicked QID's recording link — open it
+    /// when idle, end it when already recording (other links continue).
+    /// Clicks only mark while a recording runs — idle clicks are ignored
+    /// (the rail shows this via the default cursor and no hover highlight,
+    /// see `qid_rail.slint`).
     pub fn qid_select(&mut self, component_id: i64) {
         if !self.record.recording {
             return;
@@ -499,7 +515,7 @@ impl RobsController {
         self.qid.start_session(self.now_anchor());
     }
 
-    /// Auto-close the open segment at the final recording anchors, write
+    /// Auto-close every open segment at the final recording anchors, write
     /// the sidecar JSON, and hand all segments to the DB worker. Called
     /// from `stop_recording` BEFORE the elapsed-time reset.
     pub(crate) fn stop_qid_session(&mut self) {
@@ -545,50 +561,137 @@ mod tests {
         }
     }
 
+    /// Temp dir + a fake recording path inside it (the sidecar is really
+    /// written next to it on every link close).
+    fn temp_recording(tag: &str) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "robs_qid_tests_{}_{}",
+            std::process::id(),
+            tag
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let rec = dir.join("rec.mp4").to_string_lossy().into_owned();
+        (dir, rec)
+    }
+
+    fn service_with(components: &[QidComponent]) -> QidService {
+        let mut service = QidService::new(DatabaseSettings::default());
+        service.components = components.to_vec();
+        service
+    }
+
     #[test]
     fn first_click_opens_without_closing() {
         let clicked = comp(1, "QID-2210-HP-100");
-        match apply_qid_select(None, clicked.clone(), anchor(100, 5_000, 150), "rec.mp4") {
-            QidSelectAction::Opened(c) => assert_eq!(c, clicked),
+        match apply_qid_click(&[], clicked.clone(), anchor(100, 5_000, 150), "rec.mp4") {
+            QidClickAction::Opened(c) => assert_eq!(c, clicked),
             other => panic!("expected Opened, got {other:?}"),
         }
     }
 
     #[test]
-    fn second_click_closes_and_switches() {
+    fn second_click_opens_alongside_the_first() {
         let first = comp(1, "QID-2210-HP-100");
-        let open = OpenSegment { component: first, start: anchor(100, 0, 0) };
+        let open = vec![OpenSegment { component: first, start: anchor(100, 0, 0) }];
         let second = comp(2, "QID-2210-HP-101");
-        match apply_qid_select(
-            Some(&open),
+        match apply_qid_click(
+            &open,
             second.clone(),
             anchor(160, 60_000, 1_800),
             "rec.mp4",
         ) {
-            QidSelectAction::Switched { closed, opened } => {
-                assert_eq!(closed.component_id, 1);
-                assert_eq!(closed.structure_id, 211);
-                assert_eq!(closed.wall_start.timestamp(), 100);
-                assert_eq!(closed.wall_end.timestamp(), 160);
-                assert_eq!(closed.elapsed_start_ms, 0);
-                assert_eq!(closed.elapsed_end_ms, 60_000);
-                assert_eq!(closed.frame_start, 0);
-                assert_eq!(closed.frame_end, 1_800);
-                assert_eq!(closed.recording_path, "rec.mp4");
-                assert_eq!(opened, second);
-            }
-            other => panic!("expected Switched, got {other:?}"),
+            QidClickAction::Opened(c) => assert_eq!(c, second),
+            other => panic!("expected Opened, got {other:?}"),
         }
     }
 
     #[test]
-    fn reclicking_open_qid_is_a_noop() {
+    fn clicking_open_qid_closes_only_it() {
         let first = comp(1, "QID-2210-HP-100");
-        let open = OpenSegment { component: first.clone(), start: anchor(100, 0, 0) };
-        match apply_qid_select(Some(&open), first, anchor(160, 60_000, 1_800), "rec.mp4") {
-            QidSelectAction::SameQid => {}
-            other => panic!("expected SameQid, got {other:?}"),
+        let second = comp(2, "QID-2210-HP-101");
+        let open = vec![
+            OpenSegment { component: first, start: anchor(100, 0, 0) },
+            OpenSegment { component: second.clone(), start: anchor(160, 60_000, 1_800) },
+        ];
+        match apply_qid_click(&open, second, anchor(220, 120_000, 3_600), "rec.mp4") {
+            QidClickAction::Closed(closed) => {
+                assert_eq!(closed.component_id, 2);
+                assert_eq!(closed.structure_id, 211);
+                assert_eq!(closed.wall_start.timestamp(), 160);
+                assert_eq!(closed.wall_end.timestamp(), 220);
+                assert_eq!(closed.elapsed_start_ms, 60_000);
+                assert_eq!(closed.elapsed_end_ms, 120_000);
+                assert_eq!(closed.frame_start, 1_800);
+                assert_eq!(closed.frame_end, 3_600);
+                assert_eq!(closed.recording_path, "rec.mp4");
+            }
+            other => panic!("expected Closed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn service_keeps_independent_links_and_stop_closes_all() {
+        let (dir, rec) = temp_recording("independent");
+        let mut service = service_with(&[
+            comp(1, "QID-2210-HP-100"),
+            comp(2, "QID-2210-HP-101"),
+            comp(3, "QID-2210-HP-102"),
+        ]);
+
+        // Open two concurrent links.
+        let logs = service.select(1, anchor(100, 0, 0), &rec);
+        assert!(logs[0].0.contains("QID marking started"), "{}", logs[0].0);
+        service.select(2, anchor(160, 60_000, 1_800), &rec);
+        assert_eq!(service.open.len(), 2);
+
+        // End the first link only; the second keeps recording.
+        let logs = service.select(1, anchor(220, 120_000, 3_600), &rec);
+        assert!(logs[0].0.contains("QID marking ended"), "{}", logs[0].0);
+        assert_eq!(service.open.len(), 1);
+        assert_eq!(service.open[0].component.id, 2);
+        assert_eq!(service.segments.len(), 1);
+        assert_eq!(service.segments[0].component_id, 1);
+
+        // Stop auto-closes the remaining link at the FINAL anchors (its own
+        // start preserved) and writes both segments to the sidecar.
+        service.stop_session(anchor(300, 180_000, 5_400), &rec);
+        assert!(service.open.is_empty());
+        let sidecar = sidecar_path(&rec).expect("sidecar path");
+        let written: Vec<QidSegment> =
+            serde_json::from_str(&std::fs::read_to_string(&sidecar).expect("sidecar read"))
+                .expect("sidecar json");
+        assert_eq!(written.len(), 2);
+        let first_seg = written.iter().find(|s| s.component_id == 1).expect("seg 1");
+        assert_eq!(first_seg.elapsed_start_ms, 0);
+        assert_eq!(first_seg.elapsed_end_ms, 120_000);
+        assert_eq!(first_seg.frame_end, 3_600);
+        let second_seg = written.iter().find(|s| s.component_id == 2).expect("seg 2");
+        assert_eq!(second_seg.elapsed_start_ms, 60_000);
+        assert_eq!(second_seg.elapsed_end_ms, 180_000);
+        assert_eq!(second_seg.frame_start, 1_800);
+        assert_eq!(second_seg.frame_end, 5_400);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn armed_selection_auto_opens_at_next_session_start() {
+        let (dir, rec) = temp_recording("armed");
+        let mut service = service_with(&[comp(7, "QID-2210-HP-100")]);
+
+        service.select(7, anchor(100, 0, 0), &rec);
+        service.stop_session(anchor(140, 40_000, 1_200), &rec);
+        assert!(service.open.is_empty());
+
+        // The last click stays armed across the session boundary: the next
+        // recording auto-opens its segment at the start anchors.
+        service.start_session(anchor(200, 0, 0));
+        assert_eq!(service.open.len(), 1);
+        assert_eq!(service.open[0].component.id, 7);
+        assert_eq!(service.open[0].start.elapsed_ms, 0);
+        assert_eq!(service.open[0].start.frame, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

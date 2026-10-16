@@ -72,7 +72,7 @@ explicit cross-service parameter replacing reads of the flat facade fields.
 | `stop_qid_session` | `qid.*`, anchor + path from `record`, `log_event` | `Qid::stop_session(anchor) → logs`; facade helper supplies anchor (record.rs) |
 | `drain_qid_db_events` | `qid.*`, `log_event` | `Qid::drain_db_events() → (busy, logs)`; facade **delegate** (handle_events) |
 | `append_qid_sidecar` (priv) | `qid.segments`, `record.last_recording_path` (Rec) | `Qid::append_sidecar(recording_path)` (private) |
-| pure fns (`close_segment`, `apply_qid_select`, `qid_matches`, `write_sidecar`, `sidecar_path`) | none | unchanged (unit-tested) |
+| pure fns (`close_segment`, `apply_qid_click`, `qid_matches`, `write_sidecar`, `sidecar_path`) | none | unchanged (unit-tested) |
 | `now_anchor(controller)` (priv) | `record.*` | replaced by facade `now_anchor()` helper |
 
 `db.rs` (worker thread) untouched — already decoupled over channels.

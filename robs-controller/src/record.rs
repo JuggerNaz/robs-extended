@@ -1072,7 +1072,7 @@ impl RobsController {
             }
         }
 
-        // 4c. QID segments: auto-close the open segment at the final
+        // 4c. QID segments: auto-close every open segment at the final
         // anchors, write the sidecar JSON, and hand the session's segments
         // to the DB worker. MUST run before the elapsed-time reset below —
         // the closing anchor reads `recording_time`.
