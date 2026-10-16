@@ -9,8 +9,20 @@ export struct QidRowView {
     q-id: string,
     /// Sub-label (`id_no`, fallback `code`).
     sub: string,
-    /// True for the currently open/selected QID (green highlight).
-    current: bool,
+    /// True while this QID has an OPEN recording link (green highlight;
+    /// several rows can be recording concurrently).
+    recording: bool,
+}
+
+export struct QidOpenView {
+    /// `structure_components.id` (clicking the entry ends this QID's link).
+    id: int,
+    /// `structure_components.q_id`.
+    q-id: string,
+    /// Sub-label (`id_no`, fallback `code`).
+    sub: string,
+    /// Wall-clock time the link opened ("14:32:42").
+    start: string,
 }
 
 export global QidApi {
@@ -19,7 +31,7 @@ export global QidApi {
     callback refresh();
     // Live search filter; the glue re-pushes the filtered rows.
     callback search(string);
-    // Info action for the current QID (event-log entry).
+    // Info action: log every open link (or the armed QID) to the event log.
     callback details();
 
     // ---- View models (glue -> UI) ----
@@ -27,12 +39,11 @@ export global QidApi {
     // "QID LIST (N)" header count: total loaded rows, not the filtered view.
     in property <int> total;
 
-    // ---- Current QID panel (glue -> UI) ----
-    in property <bool> has-current;
-    in property <string> current-qid;
-    in property <string> current-sub;
-    // Wall-clock time the current segment opened ("14:32:42"), em dash when none.
-    in property <string> current-start;
+    // ---- RECORDING panel (glue -> UI): every QID with an open link ----
+    in property <bool> has-open;
+    in property <int> open-count;
+    // Open links ordered by start time.
+    in property <[QidOpenView]> open-qids;
 
     // ---- DB status chip (glue -> UI) ----
     in property <string> db-status;
